@@ -118,6 +118,10 @@ for skill_dir in "$FORGE_DIR"/skills/*/; do
     echo "ERROR: .agents/skills/$name exists and is not a directory; nothing was installed." >&2
     exit 1
   fi
+  # Without --force an existing skill is skipped as a whole, so preflight skips it too.
+  if [[ ( -e "$root" || -L "$root" ) && $FORCE -eq 0 ]]; then
+    continue
+  fi
   if [[ ! -L "$root" ]]; then
     while IFS= read -r -d '' src; do
       file_slot "$TARGET/.agents/skills/$name/${src#"$skill_dir"}"

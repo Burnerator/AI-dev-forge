@@ -246,6 +246,10 @@ p="$tmp/tag-headerlike"; new_project "$p"
 git -C "$p" tag -a v2 -m "release notes" -m "tagger Someone <someone@example.com> 0 +0000"
 check "a header-like line in a tag message is not taken as the tagger" secrets "$p"
 
+p="$tmp/policy-link"; new_project "$p"
+echo 'title = "x"' > "$p/policy.toml"; ln -s policy.toml "$p/.gitleaks.toml"
+rejects "refuses a symlinked .gitleaks.toml" "must be regular files" secrets "$p"
+
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
 rejects "refuses a first push without explicit bootstrap" "no trusted scanner pinned" git -C "$p" push origin main
@@ -376,6 +380,22 @@ echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"; git -C "
 nolfs="$tmp/nolfs"; mkdir -p "$nolfs"; for t in git bash env sh mktemp rm cat sed awk grep od tr head sort cut wc dirname basename find gitleaks printf; do w="$(command -v "$t" || true)"; [[ -n "$w" && "$w" == /* ]] && ln -sf "$w" "$nolfs/$t"; done
 rejects "refuses an LFS push when git-lfs is missing" "git-lfs is not installed" env PATH="$nolfs" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
 
+if git init -q --object-format=sha256 "$tmp/sha256-probe" 2>/dev/null; then
+  p="$tmp/push-sha256"; mkdir -p "$p"; git -C "$p" init -q --object-format=sha256 -b main
+  git -C "$p" config user.name test; git -C "$p" config user.email "1+test@users.noreply.github.com"
+  "$forge/scripts/install.sh" "$p" >/dev/null
+  printf '#!/usr/bin/env bash\necho "checks ok"\n' > "$p/scripts/check.sh"
+  git -C "$p" add -A; git -C "$p" commit -qm init
+  git init -q --bare --object-format=sha256 -b main "$p.remote.git"
+  git -C "$p" remote add origin "$p.remote.git"
+  git -C "$p" push -q origin main:refs/heads/old # setup only, before enabling the hook
+  git -C "$p" config core.hooksPath .githooks
+  check "allows deleting a branch in a SHA-256 repository" git -C "$p" push -q origin :refs/heads/old
+  check "the branch was deleted" no_remote_ref "$p.remote.git" refs/heads/old
+else
+  echo "  skip SHA-256 deletion (git without --object-format=sha256)"
+fi
+
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main
 echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
@@ -430,6 +450,17 @@ check "a change confined to a symlink target shows in the pin diff" grep -q '+# 
 git -C "$p" config --unset forge.trustedCommit
 out="$(trust "$p" --yes HEAD)"
 check "the first pin prints the full scanner, following links" grep -q '# change only in the link target' <<<"$out"
+
+for kind in absolute escaping; do
+  p="$tmp/trust-bad-$kind"; new_project "$p"
+  trust "$p" --yes HEAD >/dev/null
+  good="$(git -C "$p" config forge.trustedCommit)"
+  if [[ $kind == absolute ]]; then target="$tmp/elsewhere-scanner.sh"; else target="../../../outside.sh"; fi
+  rm "$p/scripts/check_secrets.sh"; ln -s "$target" "$p/scripts/check_secrets.sh"
+  git -C "$p" add -A; git -C "$p" commit -qm "scanner links outside ($kind)"
+  rejects "refuses a scanner link that leaves the repository ($kind)" "links outside the repository" trust "$p" --yes HEAD
+  check "the existing pin is untouched ($kind)" test "$(git -C "$p" config forge.trustedCommit)" = "$good"
+done
 
 q="$tmp/trust-noscanner"; mkdir -p "$q"; git -C "$q" init -q -b main
 git -C "$q" config user.name t; git -C "$q" config user.email "1+t@users.noreply.github.com"

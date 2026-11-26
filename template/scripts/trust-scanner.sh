@@ -36,7 +36,12 @@ normalize() {
   for part in "$@"; do
     case "$part" in
       "" | .) ;;
-      ..) [[ ${#out[@]} -gt 0 ]] && unset 'out[${#out[@]}-1]' ;;
+      ..)
+        if [[ ${#out[@]} -eq 0 ]]; then
+          return 1 # climbs above the repository root
+        fi
+        unset 'out[${#out[@]}-1]'
+        ;;
       *) out+=("$part") ;;
     esac
   done
@@ -49,8 +54,11 @@ resolve() {
     mode=$(git ls-tree "$commit" -- "$path" | awk '{print $1}')
     [[ "$mode" == "120000" ]] || return 0
     target=$(git cat-file -p "$commit:$path")
-    [[ "$target" == /* ]] && { echo "ERROR: $path links outside the repository." >&2; return 1; }
-    path=$(normalize "$(dirname "$path")/$target")
+    [[ "$target" == /* ]] && { echo "ERROR: $path links outside the repository ($target)." >&2; return 1; }
+    path=$(normalize "$(dirname "$path")/$target") || {
+      echo "ERROR: $2 links outside the repository ($target)." >&2
+      return 1
+    }
     hops=$((hops + 1))
   done
   echo "ERROR: too many symlink hops from $2." >&2
@@ -63,7 +71,10 @@ files=()
 for c in "$new" ${old:+"$old"}; do
   git cat-file -e "${c}^{commit}" 2>/dev/null || continue
   for f in "${base_files[@]}"; do
-    while IFS= read -r r; do files+=("$r"); done < <(resolve "$c" "$f")
+    # Command substitution, not process substitution, so a failure stops here
+    # before anything is pinned.
+    resolved=$(resolve "$c" "$f") || { echo "Not changed: cannot review $f at ${c:0:12}." >&2; exit 1; }
+    while IFS= read -r r; do files+=("$r"); done <<<"$resolved"
   done
 done
 # Unique, order kept.

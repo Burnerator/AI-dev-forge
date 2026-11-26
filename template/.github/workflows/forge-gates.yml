@@ -23,6 +23,18 @@ jobs:
         with:
           fetch-depth: 0 # full history for gitleaks and the identity check
           persist-credentials: false # PR-controlled scripts run in this job
+      # actions/checkout rewrites a checked-out tag to point at its commit, so the
+      # annotated tag object (message, tagger) is not in the checkout. Fetch it
+      # first, before any repository code runs in this job, in a step that runs
+      # only git with the token scoped to it.
+      - name: Fetch the pushed tag object
+        if: github.ref_type == 'tag'
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" \
+            fetch --no-tags origin "+$GITHUB_REF:refs/forge/pushed-tag"
       - name: Install gitleaks (pinned, checksum verified)
         env:
           GITLEAKS_VERSION: "8.30.1"
@@ -34,17 +46,6 @@ jobs:
           tar -xzf "$f" gitleaks && sudo mv gitleaks /usr/local/bin/
       - name: Secrets gate (history of the commit under test only)
         run: ./scripts/check_secrets.sh --only HEAD
-      # actions/checkout rewrites a checked-out tag to point at its commit, so the
-      # annotated tag object (message, tagger) is not in the checkout. Fetch it in
-      # a step that runs only git, with the token scoped to this step.
-      - name: Fetch the pushed tag object
-        if: github.ref_type == 'tag'
-        env:
-          TOKEN: ${{ github.token }}
-        run: |
-          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
-          git -c "http.extraheader=AUTHORIZATION: basic $auth" \
-            fetch --no-tags origin "+$GITHUB_REF:refs/forge/pushed-tag"
       - name: Secrets gate on the pushed tag (message and tagger identity)
         if: github.ref_type == 'tag'
         env:

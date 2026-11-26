@@ -30,7 +30,6 @@ set -euo pipefail
 # Scan and check the objects git actually transfers, never replacement objects.
 export GIT_NO_REPLACE_OBJECTS=1
 repo_root="$(git rev-parse --show-toplevel)"
-zero="0000000000000000000000000000000000000000"
 
 worktrees=()
 cleanup() {
@@ -66,7 +65,7 @@ input_lines=() # kept verbatim, to hand to chained hooks
 while IFS= read -r line; do
   input_lines+=("$line")
   read -r local_ref local_sha _remote_ref _remote_sha <<<"$line"
-  [[ "$local_sha" == "$zero" ]] && continue # branch deletion: nothing to test
+  [[ "$local_sha" =~ ^0+$ ]] && continue # deletion (all-zero ID, SHA-1 or SHA-256): nothing to test
   if ! git -C "$repo_root" cat-file -e "${local_sha}^{commit}" 2>/dev/null; then
     echo "pre-push: $local_ref @ $local_sha is not a commit; refusing to push it unchecked." >&2
     exit 1

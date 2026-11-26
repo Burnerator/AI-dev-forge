@@ -36,6 +36,14 @@ export GIT_NO_REPLACE_OBJECTS=1
 # The scanner policy is the reviewed one in this checkout or gitleaks' built-in
 # rules, never an override inherited from the environment.
 unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+# Scanner policy files must be regular files: a link would let a change to its
+# target, outside the Code Owner paths, alter the policy unreviewed.
+for f in .gitleaks.toml .gitleaksignore; do
+  if [[ -L "$f" ]]; then
+    echo "ERROR: $f is a symlink; scanner policy files must be regular files." >&2
+    exit 1
+  fi
+done
 gl_config=()
 [[ -f .gitleaks.toml ]] && gl_config=(--config "$PWD/.gitleaks.toml")
 

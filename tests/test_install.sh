@@ -125,6 +125,10 @@ tree_before="$(snapshot "$p")"
 refuses "rejects a file in place of a skill directory" "$install" --force "$p"
 check "nothing changed (skill file)" test "$(snapshot "$p")" = "$tree_before"
 
+p="$tmp/skill-conflict"; mkdir -p "$p/.agents/skills/code-review/SKILL.md"
+check "without --force an existing skill is skipped, even with an internal conflict" "$install" "$p"
+refuses "with --force the internal conflict is refused" "$install" --force "$p"
+
 echo "refusals"
 refuses "rejects missing directory" "$install" "$tmp/nope"
 refuses "rejects installing into the forge" "$install" "$forge"

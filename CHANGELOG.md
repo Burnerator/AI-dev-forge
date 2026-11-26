@@ -24,6 +24,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - The secrets gate checks annotated tags, nested ones included (messages and tagger emails), and ignores inline `gitleaks:allow` comments.
 - `install.sh --force` overwrites the forge's skill files and keeps project-only files, and replaces a symlink in place of a skill directory.
 - Secrets gate scans commit messages; `--only` limits a scan to given revisions, used by CI so required checks depend only on the commit under test; CI checkouts no longer persist the job token.
+- `trust-scanner.sh` refuses links that leave the repository and never pins after a failed review; CI fetches the tag object before any repository code runs; scanner policy files must not be symlinks; the hook recognises SHA-256 deletions; installer preflight follows the copy phase's skip rule.
 - The hook runs the project's previous `pre-push` hook, or `git lfs pre-push` in LFS repositories, after its gates; `trust-scanner.sh` follows symlinks and shows full files on the first pin; `.envrc` is blocked too.
 - CI fetches the annotated tag object in a git-only, token-scoped step (`actions/checkout` rewrites a checked-out tag to its commit); verified end to end with lightweight, annotated, secret-bearing and personal-email tags.
 - The hook trusts a pinned scanner commit (`forge.trustedCommit`, set with `scripts/trust-scanner.sh`, which shows the diff) instead of a ref that moves on fetch; installer preflight rejects a file in place of a skill directory.
