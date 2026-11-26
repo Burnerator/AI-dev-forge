@@ -32,6 +32,11 @@ fail=0
 # Read the real objects: replacement refs (git replace) would otherwise let the
 # scan see substitute content while a push transfers the original commits.
 export GIT_NO_REPLACE_OBJECTS=1
+# The scanner policy is the reviewed one in this checkout or gitleaks' built-in
+# rules, never an override inherited from the environment.
+unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML
+gl_config=()
+[[ -f .gitleaks.toml ]] && gl_config=(--config "$PWD/.gitleaks.toml")
 
 # A shallow clone stops at its boundary: older commits would go unchecked.
 if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
@@ -125,7 +130,7 @@ gl_status=0
 # never suppress a finding. .gitleaksignore and .gitleaks.toml are read from the
 # checkout this script runs in: in the hook that is the trusted revision; in CI
 # they need required Code Owner review (docs/enforcement.md).
-gl_out=$(gitleaks git --redact --no-banner --no-color --exit-code 3 --ignore-gitleaks-allow \
+gl_out=$(gitleaks git ${gl_config[@]+"${gl_config[@]}"} --redact --no-banner --no-color --exit-code 3 --ignore-gitleaks-allow \
   --report-format json --report-path "$report" --log-opts="$log_opts" . 2>&1) || gl_status=$?
 scanned=$(grep -oE '[0-9]+ commits scanned' <<<"$gl_out" | head -1 || true)
 echo "    ${scanned:-commit count unknown}"
@@ -151,7 +156,7 @@ echo "==> commit messages"
 # gitleaks reads patches, not commit messages, so scan the messages separately.
 msg_status=0
 git log ${scope[@]+"${scope[@]}"} --format='%B%x00' ${revs[@]+"${revs[@]}"} \
-  | gitleaks stdin --redact --no-banner --no-color --exit-code 3 --ignore-gitleaks-allow \
+  | gitleaks stdin ${gl_config[@]+"${gl_config[@]}"} --redact --no-banner --no-color --exit-code 3 --ignore-gitleaks-allow \
     --report-format json --report-path "$report" >/dev/null 2>&1 || msg_status=$?
 if [[ $msg_status -eq 3 ]]; then
   echo "ERROR: commit messages contain $(grep -c '"RuleID"' "$report" || true) secret(s) (not shown)." >&2
@@ -179,7 +184,7 @@ while IFS= read -r obj; do
   body="$(git cat-file tag "$obj")"
   tagger_emails+="$(sed -n 's/^tagger .*<\([^>]*\)>.*/\1/p' <<<"$body")"$'\n'
   t_status=0
-  git cat-file tag "$obj" | gitleaks stdin --redact --no-banner --no-color --exit-code 3 \
+  git cat-file tag "$obj" | gitleaks stdin ${gl_config[@]+"${gl_config[@]}"} --redact --no-banner --no-color --exit-code 3 \
     --ignore-gitleaks-allow >/dev/null 2>&1 || t_status=$?
   if [[ $t_status -eq 3 ]]; then
     tag_leaks=$((tag_leaks + 1))

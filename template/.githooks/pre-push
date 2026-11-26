@@ -41,11 +41,19 @@ cleanup() {
 trap cleanup EXIT
 
 # checkout <commit>: clean detached worktree of <commit>; prints its path.
+# Called in $(...), where errexit does not apply, so every step is checked.
 checkout() {
   local wt
-  wt="$(mktemp -d "${TMPDIR:-/tmp}/prepush.XXXXXX")"
-  git -C "$repo_root" worktree add --quiet --detach "$wt" "$1" >&2
+  wt="$(mktemp -d "${TMPDIR:-/tmp}/prepush.XXXXXX")" || return 1
+  if ! git -C "$repo_root" worktree add --quiet --detach "$wt" "$1" >&2; then
+    rm -rf "$wt"
+    return 1
+  fi
   printf '%s\n' "$wt"
+}
+checkout_failed() {
+  echo "pre-push: cannot create a clean checkout of $1; no gate ran, push aborted." >&2
+  exit 1
 }
 
 # Read what is being pushed before running any gate.
@@ -90,7 +98,8 @@ if [[ $bootstrap -eq 1 ]]; then
   echo "pre-push: FORGE_BOOTSTRAP=1: using each pushed tip's own scanner."
 else
   echo "pre-push: secrets gate (scanner from $trusted_ref @ ${trusted:0:7}; all refs + pushed commits)..."
-  wt="$(checkout "$trusted")"; worktrees+=("$wt")
+  wt="$(checkout "$trusted")" || checkout_failed "$trusted_ref"
+  worktrees+=("$wt")
   if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
     echo "pre-push: secrets gate failed, push aborted." >&2
     exit 1
@@ -99,7 +108,8 @@ fi
 
 for i in "${!shas[@]}"; do
   sha="${shas[$i]}"
-  wt="$(checkout "$sha")"; worktrees+=("$wt")
+  wt="$(checkout "$sha")" || checkout_failed "${refs[$i]} @ ${sha:0:7}"
+  worktrees+=("$wt")
   if [[ $bootstrap -eq 1 ]]; then
     echo "pre-push: secrets gate on ${refs[$i]} @ ${sha:0:7} (its committed scanner)..."
     if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then

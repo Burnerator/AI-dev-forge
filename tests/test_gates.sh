@@ -206,6 +206,13 @@ rejects "--tag fails when the tag has moved since the push event" "now points to
 rejects "--tag fails when the tag is missing" "not available in this checkout" secrets "$p" --tag refs/tags/nope "$pushed"
 rejects "--tag needs both arguments" "needs <tag-ref> <expected-object-id>" secrets "$p" --tag refs/tags/v1
 
+p="$tmp/env-config"; new_project "$p"
+printf 'title = "permissive"\n' > "$tmp/permissive.toml" # a policy with no rules
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects "ignores GITLEAKS_CONFIG from the environment" "$LEAK" env GITLEAKS_CONFIG="$tmp/permissive.toml" bash "$p/scripts/check_secrets.sh"
+rejects "ignores GITLEAKS_CONFIG_TOML from the environment" "$LEAK" env GITLEAKS_CONFIG_TOML="$(cat "$tmp/permissive.toml")" bash "$p/scripts/check_secrets.sh"
+
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
 rejects "refuses a first push without explicit bootstrap" "no reviewed scanner yet" git -C "$p" push origin main
@@ -297,6 +304,14 @@ printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
 rejects_all "never runs code from the push destination" "scanner from refs/remotes/origin/main" "$LEAK" git -C "$p" push origin main
 check "the destination's scanner never ran" test ! -e "$marker"
+
+p="$tmp/push-nocheckout"; new_project "$p"
+FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+echo z > "$p/z"; git -C "$p" add z; git -C "$p" commit -qm "more"
+status=0; out="$(TMPDIR="$tmp/does-not-exist" git -C "$p" push origin main 2>&1)" || status=$?
+check "stops when it cannot create a clean checkout" test "$status" -ne 0
+check "says so" grep -q "cannot create a clean checkout" <<<"$out"
+check "no gate ran on an incomplete checkout" test -z "$(grep -E 'checks ok|==> ' <<<"$out")"
 
 p="$tmp/push-msg"; new_project "$p"
 FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main

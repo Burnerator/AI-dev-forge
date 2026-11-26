@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false # check.sh is PR-controlled code
-      - name: Install shellcheck and gitleaks (macOS)
+      - name: Install shellcheck and gitleaks (macOS, current Homebrew versions on purpose, see docs/enforcement.md)
         if: runner.os == 'macOS'
         run: brew install shellcheck gitleaks
       - name: Install gitleaks (Linux, pinned, checksum verified)

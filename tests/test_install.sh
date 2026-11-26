@@ -110,6 +110,16 @@ check "leaves it alone without --force" test "$(readlink "$p/.claude/skills")" =
 check "--force repoints the link" test "$(readlink "$p/.claude/skills")" = ../.agents/skills
 check "skills visible after the repair" test -f "$p/.claude/skills/code-review/SKILL.md"
 
+echo "preflight rejects wrong file types before writing"
+p="$tmp/file-parent"; mkdir "$p"; echo "mine" > "$p/AGENTS.md"; echo "not a dir" > "$p/scripts"
+tree_before="$(snapshot "$p")"
+refuses "rejects a regular file where a directory is needed" "$install" --force "$p"
+check "nothing changed (file parent)" test "$(snapshot "$p")" = "$tree_before"
+p="$tmp/dir-slot"; mkdir -p "$p/CLAUDE.md"; echo "mine" > "$p/AGENTS.md"
+tree_before="$(snapshot "$p")"
+refuses "rejects a directory where a file is expected" "$install" --force "$p"
+check "nothing changed (directory slot)" test "$(snapshot "$p")" = "$tree_before"
+
 echo "refusals"
 refuses "rejects missing directory" "$install" "$tmp/nope"
 refuses "rejects installing into the forge" "$install" "$forge"

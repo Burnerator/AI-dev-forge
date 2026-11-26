@@ -69,7 +69,20 @@ safe_parents() {
       echo "       Replace it with a real directory and re-run." >&2
       exit 1
     fi
+    if [[ -e "$path" && ! -d "$path" ]]; then
+      echo "ERROR: ${path#"$TARGET"/} exists and is not a directory; nothing was installed." >&2
+      exit 1
+    fi
   done
+}
+
+# file_slot <dest>: the destination of a file must not be a real directory.
+file_slot() {
+  safe_parents "$1"
+  if [[ -d "$1" && ! -L "$1" ]]; then
+    echo "ERROR: ${1#"$TARGET"/} is a directory where a file is expected; nothing was installed." >&2
+    exit 1
+  fi
 }
 
 # copy_file <src> <dest>: copy unless dest exists (or --force). Never follows a
@@ -95,14 +108,14 @@ copy_file() {
 rules=(AGENTS.md CLAUDE.md .mcp.json .vscode/mcp.json
   .githooks/pre-push scripts/check.sh scripts/check_secrets.sh
   .github/workflows/forge-gates.yml .github/pull_request_template.md)
-for rel in "${rules[@]}"; do safe_parents "$TARGET/$rel"; done
+for rel in "${rules[@]}"; do file_slot "$TARGET/$rel"; done
 for skill_dir in "$FORGE_DIR"/skills/*/; do
   [[ -f "$skill_dir/SKILL.md" ]] || continue
   name="$(basename "$skill_dir")"
   safe_parents "$TARGET/.agents/skills/$name"
   if [[ ! -L "$TARGET/.agents/skills/$name" ]]; then
     while IFS= read -r -d '' src; do
-      safe_parents "$TARGET/.agents/skills/$name/${src#"$skill_dir"}"
+      file_slot "$TARGET/.agents/skills/$name/${src#"$skill_dir"}"
     done < <(find "$skill_dir" -type f -print0)
   fi
 done

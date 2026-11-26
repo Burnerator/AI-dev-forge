@@ -6,8 +6,8 @@
 
 | Rule | Guidance (agent) | Enforced by |
 |---|---|---|
-| No secrets or `.env` in git | `AGENTS.md`, `commit-message` skill | `scripts/check_secrets.sh` in `pre-push` and CI; GitHub secret scanning + push protection |
-| Commit emails are not personal | `AGENTS.md` | `check_secrets.sh` (noreply identities only) |
+| No known secret formats or `.env` files in git | `AGENTS.md`, `commit-message` skill | **Before publishing**, `pre-push` runs `scripts/check_secrets.sh`: gitleaks' rules (known key and token formats) over patches, merge diffs, binary contents, commit and tag messages, plus `.env*` paths. **After publishing**, CI runs the same check on the pushed commit, and GitHub secret scanning + push protection block known provider formats. Arbitrary sensitive data is not detected (see Limits). |
+| Commit emails are not personal | `AGENTS.md` | `check_secrets.sh` (noreply author, committer and tagger emails): before publishing in `pre-push`, after publishing in CI |
 | Lint and tests pass | `AGENTS.md` | `scripts/check.sh` at each pushed tip in `pre-push` (clean worktree) and CI |
 | No direct pushes to `main` | `AGENTS.md`, `open-pull-request` skill | Branch protection on `main` |
 | Human review of every change | `AGENTS.md`, policy | Branch protection: 1+ required approval, dismiss stale approvals |
@@ -53,6 +53,8 @@ Also enable secret scanning and push protection (Settings → Code security).
 - **Replacement objects are ignored.** Both the hook and the gate set `GIT_NO_REPLACE_OBJECTS=1`, so `git replace` cannot make them scan different content from what is pushed.
 - **Scope in CI.** CI checks only the history of the commit under test (`check_secrets.sh --only HEAD`), so a required check never depends on unrelated branches or tags. On a tag push it checks exactly the tag object the push event reported, and fails if the tag has been moved since. No step exposes the job token to repository scripts: checkouts do not persist it and no later step uses it. For a repository-wide audit, run `./scripts/check_secrets.sh` without arguments in a full clone.
 - **Commit messages are scanned** separately, since gitleaks only reads patches.
+- **The scanner policy is pinned.** `GITLEAKS_CONFIG` and `GITLEAKS_CONFIG_TOML` from your environment are ignored; the gate uses the `.gitleaks.toml` of the checkout it runs in (the trusted revision, in the hook) or gitleaks' built-in rules.
+- **Tool versions.** The Linux CI job pins gitleaks by version and checksum. The macOS job deliberately installs the current Homebrew gitleaks and ShellCheck, to catch drift in newer releases; a macOS-only failure after a formula update is a signal to review, not a repository change.
 - **The hook guards against mistakes, not against the person pushing.** `git push --no-verify`, or a clone without `core.hooksPath`, skips it entirely. CI and branch protection are the controls that do not depend on the client.
 - **What is scanned.** Every local ref (`git log --all`, which includes `refs/stash`) plus each commit being pushed, merge diffs included. A secret in a stash therefore blocks pushes until the stash is dropped. Reflogs and unreachable objects that are not pushed are out of scope.
 - **Shallow clones are rejected.** History beyond the shallow boundary could not be checked; run `git fetch --unshallow` (in CI, `fetch-depth: 0`).
