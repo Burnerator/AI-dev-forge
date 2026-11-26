@@ -10,7 +10,8 @@
 #   0) the clone is not shallow (otherwise older history would go unchecked)
 #   1) no .env file (only .env.example) in any scanned commit, merge commits included
 #   2) gitleaks finds no secrets in any scanned commit, including changes that only
-#      exist in a merge commit (conflict resolutions)
+#      exist in a merge commit (conflict resolutions) and files git treats as binary.
+#      Only a count and commit IDs are printed, never gitleaks' raw findings.
 #   3) every author/committer email is a GitHub noreply address
 # What it cannot do: detect arbitrary personal data in file contents or commit
 # messages. That still needs a human read of every diff before publishing.
@@ -56,27 +57,40 @@ if [[ $env_count -gt 0 ]]; then
   fail=1
 fi
 
-echo "==> gitleaks (full history, merge diffs included)"
+echo "==> gitleaks (full history, merge diffs and binary files included)"
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "ERROR: gitleaks not installed (https://github.com/gitleaks/gitleaks#installing). Refusing to continue." >&2
   exit 1
 fi
-# Default gitleaks log options skip merge diffs; -m adds them.
-log_opts="--all -m"
+# -m: include merge diffs (default gitleaks log options skip them).
+# --text: include the contents of files git classifies as binary.
+log_opts="--all -m --text"
 [[ ${#revs[@]} -gt 0 ]] && log_opts+=" ${revs[*]}"
+report="$(mktemp)"
+trap 'rm -f "$paths_file" "$report"' EXIT
 gl_status=0
-gl_out=$(gitleaks git --redact --no-banner --log-opts="$log_opts" . 2>&1) || gl_status=$?
-printf '%s\n' "$gl_out"
+# Exit code 3 means "findings"; anything else nonzero is an operational error.
+# Raw gitleaks output is never printed: findings carry author names, emails and
+# paths, and CI logs of public repositories are public.
+gl_out=$(gitleaks git --redact --no-banner --no-color --exit-code 3 \
+  --report-format json --report-path "$report" --log-opts="$log_opts" . 2>&1) || gl_status=$?
+scanned=$(grep -oE '[0-9]+ commits scanned' <<<"$gl_out" | head -1 || true)
+echo "    ${scanned:-commit count unknown}"
 # Fail closed: a gitleaks error, or zero commits scanned in a repo that has
-# history, must never pass as "no leaks found".
-if grep -q 'ERR' <<<"$gl_out"; then
-  echo "ERROR: gitleaks reported an error; the scan cannot be trusted." >&2
+# history, must never pass as "no leaks found". gitleaks exits 0 on some git errors.
+if [[ $gl_status -ne 0 && $gl_status -ne 3 ]] || grep -q 'ERR' <<<"$gl_out"; then
+  echo "ERROR: gitleaks failed to run (exit $gl_status); the scan cannot be trusted." >&2
+  echo "Run it locally to see why: gitleaks git -v --log-opts=\"$log_opts\" ." >&2
   fail=1
-elif git rev-parse --verify --quiet HEAD >/dev/null && grep -qE '(^|[^0-9])0 commits scanned' <<<"$gl_out"; then
-  echo "ERROR: gitleaks scanned 0 commits; the scan cannot be trusted." >&2
+elif git rev-parse --verify --quiet HEAD >/dev/null && [[ "$scanned" == "0 commits scanned" || -z "$scanned" ]]; then
+  echo "ERROR: gitleaks scanned no commits; the scan cannot be trusted." >&2
   fail=1
-elif [[ $gl_status -ne 0 ]]; then
-  echo "ERROR: gitleaks found secrets. Revoke the key at the provider, then clean history." >&2
+elif [[ $gl_status -eq 3 ]]; then
+  findings=$(grep -c '"RuleID"' "$report" || true)
+  echo "ERROR: gitleaks found $findings secret(s). Commits (details not shown, CI logs may be public):" >&2
+  grep -oE '"Commit": *"[0-9a-f]+"' "$report" | grep -oE '[0-9a-f]{40}' | sort -u | cut -c1-12 | sed 's/^/  /' >&2
+  echo "Inspect locally: gitleaks git -v --log-opts=\"$log_opts\" ." >&2
+  echo "Fix: revoke the key at the provider first, then clean history." >&2
   fail=1
 fi
 

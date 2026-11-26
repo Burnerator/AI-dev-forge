@@ -82,6 +82,9 @@ check "no skills written outside" test ! -e "$out_dir/skills"
 echo "refusals"
 refuses "rejects missing directory" "$install" "$tmp/nope"
 refuses "rejects installing into the forge" "$install" "$forge"
+src_before="$(snapshot "$forge/template")"
+refuses "rejects installing into a directory inside the forge" "$install" --force "$forge/template"
+check "forge template left intact" test "$(snapshot "$forge/template")" = "$src_before"
 refuses "rejects unknown option" "$install" --bogus "$tmp"
 
 if [[ $fails -ne 0 ]]; then

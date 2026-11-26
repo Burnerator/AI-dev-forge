@@ -4,10 +4,11 @@
 # 1) Secrets gate over all local refs PLUS every pushed commit (even one that no
 #    ref points to). The scanner is never taken from the working copy:
 #    - trusted: the committed scripts/check_secrets.sh (and .gitleaks.toml, if
-#      any) of the remote's default branch, which only changes through reviewed
-#      pull requests;
-#    - fallback, when the remote's default branch has no scanner yet (first push): the
-#      committed scanner of each pushed commit.
+#      any) of the remote's default branch, as the remote reports it right now
+#      (git ls-remote --symref), or of `git config forge.trustedRef <ref>`;
+#    - if that cannot be resolved, the push is refused (fail closed);
+#    - bootstrap, only with FORGE_BOOTSTRAP=1 when the remote is empty or its
+#      default branch predates the forge: each pushed commit's own scanner.
 # 2) Quality gate: each pushed commit is checked out in a clean temporary
 #    worktree (no .env, no uncommitted changes) and runs its own scripts/check.sh,
 #    so what is tested is what is published.
@@ -54,32 +55,68 @@ done
 
 [[ ${#shas[@]} -eq 0 ]] && exit 0
 
+# Resolve the trusted scanner. Never guessed from local tracking refs (they can
+# be stale or missing): either configured explicitly, or asked from the remote.
 trusted=""
-if [[ -n "$remote" ]]; then
-  for candidate in "refs/remotes/$remote/HEAD" "refs/remotes/$remote/main" "refs/remotes/$remote/master"; do
-    if git -C "$repo_root" rev-parse --verify --quiet "$candidate^{commit}" >/dev/null \
-      && git -C "$repo_root" cat-file -e "$candidate:scripts/check_secrets.sh" 2>/dev/null; then
-      trusted="$candidate"
-      break
+bootstrap=0
+configured="$(git -C "$repo_root" config --get forge.trustedRef || true)"
+if [[ -n "$configured" ]]; then
+  trusted="$(git -C "$repo_root" rev-parse --verify --quiet "${configured}^{commit}")" || {
+    echo "pre-push: forge.trustedRef '$configured' does not resolve to a commit; push aborted." >&2
+    exit 1
+  }
+  trusted_name="$configured"
+elif [[ -n "$remote" ]]; then
+  if ! symref="$(git -C "$repo_root" ls-remote --symref "$remote" HEAD 2>/dev/null)"; then
+    echo "pre-push: cannot ask '$remote' for its default branch; push aborted." >&2
+    echo "  Set one explicitly: git config forge.trustedRef refs/remotes/$remote/<default-branch>" >&2
+    exit 1
+  fi
+  default_ref="$(awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}' <<<"$symref")"
+  default_sha="$(awk '$1 != "ref:" && $2 == "HEAD" {print $1; exit}' <<<"$symref")"
+  if [[ -z "$default_ref" || -z "$default_sha" ]]; then
+    bootstrap=1 # empty remote: nothing reviewed exists yet
+  else
+    if ! git -C "$repo_root" cat-file -e "${default_sha}^{commit}" 2>/dev/null; then
+      git -C "$repo_root" fetch --quiet --no-tags "$remote" "$default_ref" || {
+        echo "pre-push: cannot fetch $default_ref from '$remote'; push aborted." >&2
+        exit 1
+      }
     fi
-  done
+    trusted="$default_sha"
+    trusted_name="$remote ${default_ref#refs/heads/}"
+  fi
+else
+  echo "pre-push: unknown remote; set forge.trustedRef to choose the trusted scanner. Push aborted." >&2
+  exit 1
 fi
 
-if [[ -n "$trusted" ]]; then
-  echo "pre-push: secrets gate (scanner from $trusted; all refs + pushed commits)..."
+if [[ -n "$trusted" ]] && ! git -C "$repo_root" cat-file -e "$trusted:scripts/check_secrets.sh" 2>/dev/null; then
+  bootstrap=1 # the default branch predates the forge
+  trusted=""
+fi
+
+if [[ $bootstrap -eq 1 ]]; then
+  if [[ "${FORGE_BOOTSTRAP:-}" != "1" ]]; then
+    echo "pre-push: the remote's default branch has no reviewed scanner yet, so there is nothing" >&2
+    echo "  trusted to scan with. If this is the push that introduces the forge, rerun with" >&2
+    echo "  FORGE_BOOTSTRAP=1 git push ...   (each pushed commit is then scanned with its own scanner)." >&2
+    exit 1
+  fi
+  echo "pre-push: FORGE_BOOTSTRAP=1: using each pushed commit's own scanner."
+else
+  echo "pre-push: secrets gate (scanner from $trusted_name @ ${trusted:0:7}; all refs + pushed commits)..."
   wt="$(checkout "$trusted")"; worktrees+=("$wt")
   if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
     echo "pre-push: secrets gate failed, push aborted." >&2
     exit 1
   fi
-else
-  echo "pre-push: the remote's default branch has no committed scanner yet (first push?); using each pushed commit's own scanner."
 fi
 
 for i in "${!shas[@]}"; do
   sha="${shas[$i]}"
   wt="$(checkout "$sha")"; worktrees+=("$wt")
-  if [[ -z "$trusted" ]]; then
+  if [[ $bootstrap -eq 1 ]]; then
     echo "pre-push: secrets gate on ${refs[$i]} @ ${sha:0:7} (its committed scanner)..."
     if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
       echo "pre-push: secrets gate failed, push aborted." >&2

@@ -41,8 +41,9 @@ if [[ ! -d "$TARGET" ]]; then
 fi
 TARGET="$(cd "$TARGET" && pwd -P)"
 
-if [[ "$TARGET" == "$FORGE_DIR" ]]; then
-  echo "Refusing to install the forge into itself." >&2; exit 1
+# Refuse the forge itself or anything inside it (e.g. template/), before any change.
+if [[ "$TARGET/" == "$FORGE_DIR/"* ]]; then
+  echo "Refusing to install the forge into itself or into a directory inside it." >&2; exit 1
 fi
 
 run() {
