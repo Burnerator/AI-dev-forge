@@ -59,7 +59,7 @@ Never:
 
 ### Gates
 
-Before proposing a push, run `./scripts/check.sh` (lint + tests) and `./scripts/check_secrets.sh` (no `.env` in history, no leaked keys, noreply commit emails). The `pre-push` hook and CI run the same scripts; enable the hook once per clone with `git config core.hooksPath .githooks`.
+Before proposing a push, run `./scripts/check.sh` (lint + tests) and `./scripts/check_secrets.sh` (no `.env` in history, no leaked keys, noreply commit emails, full clone). The `pre-push` hook and CI run the same scripts; enable the hook once per clone with `git config core.hooksPath .githooks`.
 
 ### Reviews
 

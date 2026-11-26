@@ -42,7 +42,10 @@ Also enable secret scanning and push protection (Settings → Code security).
 - **The hook is client-side.** A clone without `core.hooksPath`, or `git push --no-verify`, skips it. CI on every branch compensates in part.
 - **CI runs after publishing.** If a push to a branch contains a secret, it is already public (on a public repo) even if CI fails. Push protection only blocks known key formats.
 - **Branch protection covers `main` only.** Other branches accept pushes without review.
-- **A commit can weaken its own gate.** The hook and CI run the `check.sh` and `check_secrets.sh` of the commit being pushed. Only required Code Owner review of those paths closes this; without it, it is a reviewer's job to catch.
-- **The hook scans pushed commits, not reflogs or stashes.** It checks every ref plus each commit being pushed, merge diffs included; objects that are never pushed are out of scope.
+- **Which scanner runs.** The hook never uses the working copy's scripts. It runs the secrets gate committed on the remote's default branch (changed only through reviewed pull requests) and, on the very first push when no default branch exists yet, the gate committed in each pushed commit. `check.sh` always runs from the pushed commit, and so do both scripts in CI.
+- **A commit can weaken its own gate in CI and in `check.sh`.** CI runs the scripts of the commit under test. Only required Code Owner review of those paths closes this; without it, it is a reviewer's job to catch.
+- **The hook guards against mistakes, not against the person pushing.** `git push --no-verify`, or a clone without `core.hooksPath`, skips it entirely. CI and branch protection are the controls that do not depend on the client.
+- **What is scanned.** Every local ref (`git log --all`, which includes `refs/stash`) plus each commit being pushed, merge diffs included. A secret in a stash therefore blocks pushes until the stash is dropped. Reflogs and unreachable objects that are not pushed are out of scope.
+- **Shallow clones are rejected.** History beyond the shallow boundary could not be checked; run `git fetch --unshallow` (in CI, `fetch-depth: 0`).
 - **gitleaks matches known patterns.** It does not find arbitrary personal data in file contents or commit messages. Every diff still needs a human read before it is published.
 - **If something sensitive leaks:** revoke or rotate it first. Deleting or rewriting history does not remove copies already made (forks, caches, clones).

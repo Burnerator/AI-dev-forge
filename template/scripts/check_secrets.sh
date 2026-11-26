@@ -7,6 +7,7 @@
 #   ref points to is scanned too.
 #
 # What it checks:
+#   0) the clone is not shallow (otherwise older history would go unchecked)
 #   1) no .env file (only .env.example) in any scanned commit, merge commits included
 #   2) gitleaks finds no secrets in any scanned commit, including changes that only
 #      exist in a merge commit (conflict resolutions)
@@ -17,6 +18,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 fail=0
+
+# A shallow clone stops at its boundary: older commits would go unchecked.
+if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+  echo "ERROR: shallow clone; the full history cannot be checked." >&2
+  echo "Fix: git fetch --unshallow (in CI: actions/checkout with fetch-depth: 0)." >&2
+  exit 1
+fi
 
 revs=()
 for rev in "$@"; do

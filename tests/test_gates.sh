@@ -8,14 +8,25 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 fails=0
 
+pass() { echo "  ok   $1"; }
+fail() { echo "  FAIL $1${2:+: $2}" >&2; fails=$((fails + 1)); }
+
+# check <description> <command...>: the command must succeed.
 check() {
   local desc="$1"; shift
-  if "$@" >/dev/null 2>&1; then echo "  ok   $desc"; else echo "  FAIL $desc" >&2; fails=$((fails + 1)); fi
+  if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
 }
-refuses() {
-  local desc="$1"; shift
-  if "$@" >/dev/null 2>&1; then echo "  FAIL $desc" >&2; fails=$((fails + 1)); else echo "  ok   $desc"; fi
+# rejects <description> <expected diagnostic (ERE)> <command...>: the command
+# must fail AND print the expected diagnostic, so a crash or an unrelated
+# failure does not count as a pass.
+rejects() {
+  local desc="$1" pattern="$2" out status=0; shift 2
+  out="$("$@" 2>&1)" || status=$?
+  if [[ $status -eq 0 ]]; then fail "$desc" "command succeeded"
+  elif ! grep -qE "$pattern" <<<"$out"; then fail "$desc" "missing diagnostic /$pattern/"
+  else pass "$desc"; fi
 }
+no_remote_ref() { ! git -C "$1" rev-parse --verify -q "$2" >/dev/null; }
 
 # Bounded read: git ignores SIGPIPE in hooks, so an unbounded `tr </dev/urandom | head`
 # never terminates when this suite runs inside the pre-push hook.
@@ -40,6 +51,8 @@ new_project() {
 }
 
 secrets() { (cd "$1" && ./scripts/check_secrets.sh "${@:2}"); }
+LEAK='gitleaks found secrets'
+ENV='\.env file\(s\) present'
 
 echo "check_secrets.sh"
 p="$tmp/clean"; new_project "$p"
@@ -49,19 +62,21 @@ p="$tmp/merge"; new_project "$p"
 echo a > "$p/f"; git -C "$p" add f; git -C "$p" commit -qm a
 git -C "$p" switch -qc side; echo b > "$p/f"; git -C "$p" commit -qam b
 git -C "$p" switch -q main; echo c > "$p/f"; git -C "$p" commit -qam c
-git -C "$p" merge -q side >/dev/null 2>&1 || true
+if git -C "$p" merge -q side >/dev/null 2>&1; then fail "fixture: merge should conflict"; fi
 printf 'resolved\ntoken = "%s"\n' "$(fake_token)" > "$p/f"
 git -C "$p" add f; git -C "$p" commit -qm "merge side"
-refuses "finds a secret that only exists in a merge commit" secrets "$p"
+check "fixture: HEAD is a merge commit with two parents" test "$(git -C "$p" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" = 3
+check "fixture: the token is not in either parent" test -z "$(git -C "$p" grep -l ghp_ HEAD^1 HEAD^2 -- f)"
+rejects "finds a secret that only exists in a merge commit" "$LEAK" secrets "$p"
 
 p="$tmp/envroot"; new_project "$p"
 echo "X=1" > "$p/.env.local"; git -C "$p" add -f .env.local; git -C "$p" commit -qm env
-refuses "finds .env.local at the root" secrets "$p"
+rejects "finds .env.local at the root" "$ENV" secrets "$p"
 
 p="$tmp/envquoted"; new_project "$p"
 mkdir -p "$p/dír con espacio"; echo "X=1" > "$p/dír con espacio/.env"
 git -C "$p" add -f "dír con espacio/.env"; git -C "$p" commit -qm env
-refuses "finds .env in a path git would quote" secrets "$p"
+rejects "finds .env in a path git would quote" "$ENV" secrets "$p"
 
 p="$tmp/example"; new_project "$p"
 echo "X=" > "$p/.env.example"; git -C "$p" add .env.example; git -C "$p" commit -qm example
@@ -70,26 +85,34 @@ check "allows .env.example" secrets "$p"
 p="$tmp/identity"; new_project "$p"
 echo x > "$p/x"; git -C "$p" add x
 git -C "$p" -c user.email=someone@example.com commit -qm personal
-refuses "rejects a personal commit email" secrets "$p"
+rejects "rejects a personal commit email" "non-noreply email" secrets "$p"
 
 p="$tmp/badrev"; new_project "$p"
-refuses "rejects an argument that is not a commit" secrets "$p" not-a-commit
+rejects "rejects an argument that is not a commit" "not a commit" secrets "$p" not-a-commit
+
+p="$tmp/shallow-src"; new_project "$p"
+echo 1 > "$p/a"; git -C "$p" add a; git -C "$p" commit -qm one
+echo 2 > "$p/a"; git -C "$p" commit -qam two
+git clone -q --depth 1 "file://$p" "$tmp/shallow"
+rejects "rejects a shallow clone" "shallow clone" secrets "$tmp/shallow"
 
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
-check "allows a clean push" git -C "$p" push -q origin main
+check "allows a clean first push" git -C "$p" push -q origin main
+check "the push reached the remote" git -C "$p.remote.git" rev-parse --verify -q refs/heads/main
 
 p="$tmp/push-fail"; new_project "$p"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$p/scripts/check.sh"
 git -C "$p" commit -qam "break checks"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check.sh" # passing, but uncommitted
-refuses "blocks when the pushed tree fails check.sh (ignores the working tree)" git -C "$p" push -q origin main
-refuses "nothing reached the remote" git -C "$p.remote.git" rev-parse --verify -q refs/heads/main
+rejects "blocks when the pushed tree fails check.sh (ignores the working tree)" "checks failed for refs/heads/main" git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
 
 p="$tmp/push-secret"; new_project "$p"
 printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
-refuses "blocks a push that contains a secret" git -C "$p" push -q origin main
+rejects "blocks a first push that contains a secret" "secrets gate failed" git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
 
 p="$tmp/push-orphan"; new_project "$p"
 git -C "$p" push -q origin main
@@ -97,8 +120,25 @@ git -C "$p" switch -q --detach
 echo "X=1" > "$p/.env"; git -C "$p" add -f .env; git -C "$p" commit -qm "env on detached HEAD"
 orphan="$(git -C "$p" rev-parse HEAD)"
 git -C "$p" switch -q main # no ref points to the commit any more
-refuses "blocks pushing by SHA a commit that no ref points to" git -C "$p" push -q origin "$orphan:refs/heads/sneaky"
-refuses "the unreferenced commit did not reach the remote" git -C "$p.remote.git" rev-parse --verify -q refs/heads/sneaky
+rejects "blocks pushing by SHA a commit that no ref points to" "secrets gate failed" git -C "$p" push origin "$orphan:refs/heads/sneaky"
+check "the unreferenced commit did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/sneaky
+
+p="$tmp/push-wc-scanner"; new_project "$p"
+git -C "$p" push -q origin main
+printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh" # weakened, uncommitted
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects "ignores a weakened scanner in the working copy" "secrets gate failed" git -C "$p" push origin main
+check "the secret did not reach the remote" test "$(git -C "$p.remote.git" rev-parse main)" != "$(git -C "$p" rev-parse main)"
+
+p="$tmp/push-committed-scanner"; new_project "$p"
+git -C "$p" push -q origin main
+git -C "$p" switch -qc feat/weaken
+printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add -A; git -C "$p" commit -qm "weaken scanner and add config"
+rejects "uses the default branch's scanner, not one committed on the branch" "secrets gate failed" git -C "$p" push origin feat/weaken
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/weaken
 
 if [[ $fails -ne 0 ]]; then
   echo "$fails test(s) failed" >&2

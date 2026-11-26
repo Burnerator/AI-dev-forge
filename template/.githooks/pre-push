@@ -1,12 +1,43 @@
 #!/usr/bin/env bash
 # Blocks the push unless the commits being pushed pass the gates.
-# 1) Secrets gate over all refs PLUS every pushed commit (even one no ref points to).
-# 2) Quality gate: each pushed commit is checked out in a clean temporary worktree
-#    (no .env, no uncommitted changes), so what is tested is what is published.
+#
+# 1) Secrets gate over all local refs PLUS every pushed commit (even one that no
+#    ref points to). The scanner is never taken from the working copy:
+#    - trusted: the committed scripts/check_secrets.sh (and .gitleaks.toml, if
+#      any) of the remote's default branch, which only changes through reviewed
+#      pull requests;
+#    - fallback, when the remote has no default branch yet (first push): the
+#      committed scanner of each pushed commit.
+# 2) Quality gate: each pushed commit is checked out in a clean temporary
+#    worktree (no .env, no uncommitted changes) and runs its own scripts/check.sh,
+#    so what is tested is what is published.
+#
+# Trust boundary: this is a guard against mistakes by the person pushing, not
+# against that person (git push --no-verify skips it). CI and branch protection
+# are the controls that do not depend on the client.
+#
 # Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
+remote="${1:-}"
 repo_root="$(git rev-parse --show-toplevel)"
 zero="0000000000000000000000000000000000000000"
+
+worktrees=()
+cleanup() {
+  local wt
+  for wt in ${worktrees[@]+"${worktrees[@]}"}; do
+    git -C "$repo_root" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+  done
+}
+trap cleanup EXIT
+
+# checkout <commit>: clean detached worktree of <commit>; prints its path.
+checkout() {
+  local wt
+  wt="$(mktemp -d "${TMPDIR:-/tmp}/prepush.XXXXXX")"
+  git -C "$repo_root" worktree add --quiet --detach "$wt" "$1" >&2
+  printf '%s\n' "$wt"
+}
 
 # Read what is being pushed before running any gate.
 refs=()
@@ -23,21 +54,40 @@ done
 
 [[ ${#shas[@]} -eq 0 ]] && exit 0
 
-echo "pre-push: secrets gate (all refs + pushed commits)..."
-if ! "$repo_root/scripts/check_secrets.sh" "${shas[@]}"; then
-  echo "pre-push: secrets gate failed, push aborted." >&2
-  exit 1
+trusted=""
+if [[ -n "$remote" ]]; then
+  for candidate in "refs/remotes/$remote/HEAD" "refs/remotes/$remote/main" "refs/remotes/$remote/master"; do
+    if git -C "$repo_root" rev-parse --verify --quiet "$candidate^{commit}" >/dev/null \
+      && git -C "$repo_root" cat-file -e "$candidate:scripts/check_secrets.sh" 2>/dev/null; then
+      trusted="$candidate"
+      break
+    fi
+  done
+fi
+
+if [[ -n "$trusted" ]]; then
+  echo "pre-push: secrets gate (scanner from $trusted; all refs + pushed commits)..."
+  wt="$(checkout "$trusted")"; worktrees+=("$wt")
+  if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
+    echo "pre-push: secrets gate failed, push aborted." >&2
+    exit 1
+  fi
+else
+  echo "pre-push: no default branch on the remote yet; using each pushed commit's own scanner."
 fi
 
 for i in "${!shas[@]}"; do
   sha="${shas[$i]}"
-  wt="$(mktemp -d "${TMPDIR:-/tmp}/prepush.XXXXXX")"
-  git -C "$repo_root" worktree add --quiet --detach "$wt" "$sha"
+  wt="$(checkout "$sha")"; worktrees+=("$wt")
+  if [[ -z "$trusted" ]]; then
+    echo "pre-push: secrets gate on ${refs[$i]} @ ${sha:0:7} (its committed scanner)..."
+    if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
+      echo "pre-push: secrets gate failed, push aborted." >&2
+      exit 1
+    fi
+  fi
   echo "pre-push: quality gate on ${refs[$i]} @ ${sha:0:7} (clean checkout)..."
-  status=0
-  (cd "$wt" && ./scripts/check.sh) || status=$?
-  git -C "$repo_root" worktree remove --force "$wt"
-  if [[ $status -ne 0 ]]; then
+  if ! (cd "$wt" && ./scripts/check.sh); then
     echo "pre-push: checks failed for ${refs[$i]} @ ${sha:0:7}, push aborted." >&2
     exit 1
   fi
