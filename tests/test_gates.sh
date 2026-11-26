@@ -26,7 +26,9 @@ rejects() {
   local desc="$1" pattern="$2" out status=0; shift 2
   out="$("$@" 2>&1)" || status=$?
   if [[ $status -eq 0 ]]; then fail "$desc" "command succeeded"
-  elif ! grep -qE "$pattern" <<<"$out"; then fail "$desc" "missing diagnostic /$pattern/"
+  elif ! grep -qE "$pattern" <<<"$out"; then
+    fail "$desc" "missing diagnostic /$pattern/"
+    tail -n 8 <<<"$out" | sed 's/^/         | /' >&2
   else pass "$desc"; fi
 }
 no_remote_ref() { ! git -C "$1" rev-parse --verify -q "$2" >/dev/null; }
@@ -49,7 +51,9 @@ new_project() {
   git -C "$p" config core.hooksPath .githooks
   git -C "$p" add -A
   git -C "$p" commit -qm "chore: install forge"
-  git init -q --bare "$p.remote.git"
+  # Explicit default branch: runners without init.defaultBranch would point the
+  # bare remote's HEAD at a non-existent master.
+  git init -q --bare -b main "$p.remote.git"
   git -C "$p" remote add origin "$p.remote.git"
 }
 
