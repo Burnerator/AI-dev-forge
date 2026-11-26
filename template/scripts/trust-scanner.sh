@@ -26,43 +26,63 @@ if ! git cat-file -e "$new:scripts/check_secrets.sh" 2>/dev/null; then
   exit 1
 fi
 
-# resolve <commit> <path>: print <path> and, if it is a symlink inside the tree,
-# every path it leads to, so a change in the link target cannot hide behind an
-# unchanged link.
-normalize() {
-  local IFS=/ part out=()
-  # shellcheck disable=SC2086 # split on / is intended
-  set -- $1
-  for part in "$@"; do
-    case "$part" in
-      "" | .) ;;
-      ..)
-        if [[ ${#out[@]} -eq 0 ]]; then
-          return 1 # climbs above the repository root
-        fi
-        unset 'out[${#out[@]}-1]'
-        ;;
-      *) out+=("$part") ;;
-    esac
-  done
-  printf '%s\n' "${out[*]}"
-}
+# resolve <commit> <path>: print <path> and every path it leads to through
+# symlinks, so a change in a link target cannot hide behind an unchanged link.
 resolve() {
-  local commit="$1" path="$2" hops=0 mode target
-  while [[ $hops -lt 10 ]]; do
-    printf '%s\n' "$path"
-    mode=$(git ls-tree "$commit" -- "$path" | awk '{print $1}')
-    [[ "$mode" == "120000" ]] || return 0
-    target=$(git cat-file -p "$commit:$path")
-    [[ "$target" == /* ]] && { echo "ERROR: $path links outside the repository ($target)." >&2; return 1; }
-    path=$(normalize "$(dirname "$path")/$target") || {
-      echo "ERROR: $2 links outside the repository ($target)." >&2
+  # Walk the path one component at a time inside the commit's tree, following
+  # symlinks wherever they appear (a link to a directory included). Prints every
+  # path visited. Fails if a component is missing, a link leaves the tree, or
+  # the walk does not end at a tracked regular file. Prints nothing (success)
+  # only if the starting path does not exist at all.
+  local commit="$1" start="$2" hops=0 done_path="" rest="$2" comp entry mode cand target
+  while [[ -n "$rest" ]]; do
+    comp="${rest%%/*}"
+    if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+    [[ -z "$comp" || "$comp" == "." ]] && continue
+    if [[ "$comp" == ".." ]]; then
+      if [[ -z "$done_path" ]]; then
+        echo "ERROR: $start links outside the repository." >&2
+        return 1
+      fi
+      [[ "$done_path" == */* ]] && done_path="${done_path%/*}" || done_path=""
+      continue
+    fi
+    cand="${done_path:+$done_path/}$comp"
+    entry="$(git ls-tree "$commit" -- "$cand")"
+    if [[ -z "$entry" ]]; then
+      if [[ "$cand" == "$start" && $hops -eq 0 ]]; then
+        return 0 # the file simply does not exist (optional policy files)
+      fi
+      echo "ERROR: $start resolves through $cand, which is not tracked at ${commit:0:12}." >&2
       return 1
-    }
-    hops=$((hops + 1))
+    fi
+    mode="${entry%% *}"
+    if [[ "$mode" == "120000" ]]; then
+      hops=$((hops + 1))
+      if [[ $hops -gt 20 ]]; then
+        echo "ERROR: too many symlink hops from $start." >&2
+        return 1
+      fi
+      printf '%s\n' "$cand"
+      target="$(git cat-file -p "$commit:$cand")"
+      if [[ "$target" == /* ]]; then
+        echo "ERROR: $start links outside the repository ($target)." >&2
+        return 1
+      fi
+      rest="$target${rest:+/$rest}" # relative to the link's directory, done_path
+      continue
+    fi
+    done_path="$cand"
+    if [[ -n "$rest" && "$mode" != "040000" ]]; then
+      echo "ERROR: $start resolves through $cand, which is not a directory." >&2
+      return 1
+    fi
   done
-  echo "ERROR: too many symlink hops from $2." >&2
-  return 1
+  if [[ "$mode" != "100644" && "$mode" != "100755" ]]; then
+    echo "ERROR: $start does not resolve to a tracked regular file." >&2
+    return 1
+  fi
+  printf '%s\n' "$done_path"
 }
 
 base_files=(scripts/check_secrets.sh .gitleaks.toml .gitleaksignore)
@@ -74,9 +94,15 @@ for c in "$new" ${old:+"$old"}; do
     # Command substitution, not process substitution, so a failure stops here
     # before anything is pinned.
     resolved=$(resolve "$c" "$f") || { echo "Not changed: cannot review $f at ${c:0:12}." >&2; exit 1; }
-    while IFS= read -r r; do files+=("$r"); done <<<"$resolved"
+    while IFS= read -r r; do [[ -n "$r" ]] && files+=("$r"); done <<<"$resolved"
   done
 done
+# The scanner itself must end at a tracked executable.
+scanner_final="$(resolve "$new" scripts/check_secrets.sh | tail -1)"
+if [[ "$(git ls-tree "$new" -- "$scanner_final" | awk '{print $1}')" != "100755" ]]; then
+  echo "Not changed: scripts/check_secrets.sh at ${new:0:12} does not resolve to a tracked executable." >&2
+  exit 1
+fi
 # Unique, order kept.
 uniq_files=()
 for f in "${files[@]}"; do

@@ -79,14 +79,30 @@ done
 # $GIT_COMMON_DIR/hooks (for example Git LFS or another tool's hook) or, if
 # there is none and the repository uses Git LFS, `git lfs pre-push`. Without
 # this, LFS objects would not be uploaded and clones would get bare pointers.
+# If you already had a custom core.hooksPath (husky, lefthook, ...), record its
+# pre-push hook before switching: git config forge.previousHook <path>.
 chain_existing_hooks() {
-  local legacy uses_lfs=0
-  legacy="$(git -C "$repo_root" rev-parse --git-common-dir)/hooks/pre-push"
-  [[ "$legacy" != /* ]] && legacy="$repo_root/$legacy"
-  if git -C "$repo_root" config --get-regexp '^filter\.lfs\.' >/dev/null 2>&1 \
-    || git -C "$repo_root" grep -q 'filter=lfs' HEAD -- .gitattributes '*/.gitattributes' 2>/dev/null; then
+  local legacy uses_lfs=0 tip
+  legacy="$(git -C "$repo_root" config --get forge.previousHook || true)"
+  if [[ -n "$legacy" ]]; then
+    [[ "$legacy" != /* ]] && legacy="$repo_root/$legacy"
+    if [[ ! -x "$legacy" ]]; then
+      echo "pre-push: forge.previousHook '$legacy' is not an executable file; push aborted." >&2
+      exit 1
+    fi
+  else
+    legacy="$(git -C "$repo_root" rev-parse --git-common-dir)/hooks/pre-push"
+    [[ "$legacy" != /* ]] && legacy="$repo_root/$legacy"
+  fi
+  if git -C "$repo_root" config --get-regexp '^filter\.lfs\.' >/dev/null 2>&1; then
     uses_lfs=1
   fi
+  # LFS attributes of what is pushed, not of the checked-out branch.
+  for tip in ${shas[@]+"${shas[@]}"}; do
+    if git -C "$repo_root" grep -q 'filter=lfs' "$tip" -- .gitattributes '*/.gitattributes' 2>/dev/null; then
+      uses_lfs=1
+    fi
+  done
   if [[ -x "$legacy" ]]; then
     echo "pre-push: running the previous pre-push hook ($legacy)..."
     printf '%s\n' ${input_lines[@]+"${input_lines[@]}"} | "$legacy" "$@" || {

@@ -18,9 +18,9 @@ Anything that **must** hold is checked by deterministic tooling instead of the m
 
 | Client | Reads rules from | Reads skills from | Guide |
 |---|---|---|---|
-| Claude Code | `CLAUDE.md` (which imports `AGENTS.md`) | `.claude/skills/` (symlinked to `.agents/skills/`) | [docs/clients/claude-code.md](docs/clients/claude-code.md) |
-| Codex CLI | `AGENTS.md` | `.agents/skills/` | [docs/clients/codex-cli.md](docs/clients/codex-cli.md) |
-| GitHub Copilot | `AGENTS.md` | `.agents/skills/` | [docs/clients/github-copilot.md](docs/clients/github-copilot.md) |
+| Claude Code | `CLAUDE.md` (which imports `AGENTS.md`) | `.claude/skills/` (symlinked to `.agents/skills/`) | [docs/clients/claude-code.md](docs/clients/claude-code.md) (verified with 2.1.330) |
+| Codex CLI | `AGENTS.md` | `.agents/skills/` | [docs/clients/codex-cli.md](docs/clients/codex-cli.md) (documented, not yet verified end to end) |
+| GitHub Copilot (VS Code agent mode) | `AGENTS.md` | `.agents/skills/` | [docs/clients/github-copilot.md](docs/clients/github-copilot.md) (documented, not yet verified end to end; other Copilot surfaces vary) |
 
 `AGENTS.md` and `.agents/skills/` are the single source of truth. Client-specific files only point at them.
 
@@ -45,7 +45,7 @@ Then, in the project:
 2. Run the preflight on the existing history: `./scripts/check_secrets.sh` (needs [gitleaks](https://github.com/gitleaks/gitleaks) and a full, non-shallow clone). In an existing project it may report `.env` files, keys or personal emails from the past. Either clean the history before publishing, or, if your team legitimately commits with corporate addresses in a private repository, adjust the identity pattern in `scripts/check_secrets.sh` through a reviewed pull request.
 3. Edit `AGENTS.md`: fill in the build and test commands and anything project-specific.
 4. Put your real lint and test commands in `scripts/check.sh`. It fails on purpose until you do.
-5. Enable the hook: `git config core.hooksPath .githooks`. If the project already has a `pre-push` hook (Git LFS, for example), the forge's hook runs it after its own gates, and runs `git lfs pre-push` for LFS repositories.
+5. Enable the hook: `git config core.hooksPath .githooks`. If the project already has a `pre-push` hook in `.git/hooks` (Git LFS, for example), the forge's hook runs it after its own gates, and runs `git lfs pre-push` when the pushed commits use LFS. If you already had a custom `core.hooksPath` (husky, lefthook…), record its hook first: `git config forge.previousHook <old-hooks-dir>/pre-push`, then switch.
 6. Commit on a branch and push it with `FORGE_BOOTSTRAP=1 git push -u origin <branch>`: nothing reviewed exists to scan with yet, so this one push uses the branch's own scanner. Open the pull request and merge it once reviewed.
 7. After the merge, pin the reviewed scanner in each clone: `git fetch origin && scripts/trust-scanner.sh refs/remotes/origin/main`. It shows the scanner (links followed) and stores that exact commit, which does not move when you fetch. From now on pushes need no bootstrap; to accept a newer scanner later, run it again and read the diff.
 8. Protect `main` and require the `forge-gates` checks: see [docs/enforcement.md](docs/enforcement.md).

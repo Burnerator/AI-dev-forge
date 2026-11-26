@@ -2,7 +2,7 @@
 
 > **Verification status (2026-11-26):** the paths and settings below follow the vendor's documentation and the cross-client conventions; the maintainers have not yet verified them end to end in this client. If something differs in your version, please open an issue with the version you tested. Only the installer's output and the forge's gates are covered by tests.
 
-Applies to Copilot agent mode in VS Code, Visual Studio and JetBrains IDEs, GitHub Copilot CLI, and Copilot cloud agent and code review on GitHub.com. Feature support varies by IDE and version; check GitHub's Copilot feature matrix.
+This guide targets **Copilot agent mode in VS Code**, the surface the statements below are written for. Other Copilot surfaces (Visual Studio, JetBrains IDEs, Copilot CLI, the cloud agent and code review on GitHub.com) support `AGENTS.md`, skills and MCP to different degrees and in different versions; check GitHub's Copilot feature matrix before relying on any of them, and treat each statement below as applying to VS Code agent mode only unless it says otherwise.
 
 ## Rules
 

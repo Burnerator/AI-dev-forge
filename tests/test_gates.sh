@@ -396,6 +396,24 @@ else
   echo "  skip SHA-256 deletion (git without --object-format=sha256)"
 fi
 
+p="$tmp/push-customhooks"; new_project "$p"
+mkdir -p "$p/.husky"; marker="$tmp/custom.ran"
+printf '#!/usr/bin/env bash\ncat > "%s"\n' "$marker" > "$p/.husky/pre-push"; chmod +x "$p/.husky/pre-push"
+git -C "$p" config forge.previousHook .husky/pre-push # recorded before switching core.hooksPath
+check "push with a custom previous hooks path" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "the previous custom pre-push hook ran" grep -q "refs/heads/main" "$marker"
+p="$tmp/push-badprevious"; new_project "$p"
+git -C "$p" config forge.previousHook .husky/missing
+rejects "refuses a forge.previousHook that is not executable" "is not an executable file" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+
+p="$tmp/push-lfs-branch"; new_project "$p"
+git -C "$p" switch -qc lfs-branch
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"; git -C "$p" add .gitattributes; git -C "$p" commit -qm "use lfs"
+git -C "$p" switch -q main # the checkout does not use LFS
+rm -f "$lfsmark"
+check "push an LFS branch from a non-LFS checkout" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin lfs-branch
+check "git lfs pre-push ran for the pushed LFS branch" grep -q "refs/heads/lfs-branch" "$lfsmark"
+
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main
 echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
@@ -450,6 +468,26 @@ check "a change confined to a symlink target shows in the pin diff" grep -q '+# 
 git -C "$p" config --unset forge.trustedCommit
 out="$(trust "$p" --yes HEAD)"
 check "the first pin prints the full scanner, following links" grep -q '# change only in the link target' <<<"$out"
+
+p="$tmp/trust-dirlink"; new_project "$p"
+mkdir -p "$p/real/bin"; git -C "$p" mv scripts/check_secrets.sh real/bin/check_secrets.sh
+ln -s real/bin "$p/linkdir"; ln -s ../linkdir/check_secrets.sh "$p/scripts/check_secrets.sh"
+git -C "$p" add -A; git -C "$p" commit -qm "scanner behind a linked directory"
+trust "$p" --yes HEAD >/dev/null
+printf '\n# edit behind a linked directory\n' >> "$p/real/bin/check_secrets.sh"; git -C "$p" commit -qam "edit"
+out="$(trust "$p" --yes HEAD)"
+check "follows a link through a linked directory and shows the real change" grep -q '+# edit behind a linked directory' <<<"$out"
+
+p="$tmp/trust-dirlink-out"; new_project "$p"
+trust "$p" --yes HEAD >/dev/null; good="$(git -C "$p" config forge.trustedCommit)"
+ln -s ../../.. "$p/up"; rm "$p/scripts/check_secrets.sh"; ln -s ../up/outside.sh "$p/scripts/check_secrets.sh"
+git -C "$p" add -A; git -C "$p" commit -qm "escape through a linked directory"
+rejects "refuses an escape through a linked directory" "outside the repository|not tracked" trust "$p" --yes HEAD
+check "the pin is untouched (directory escape)" test "$(git -C "$p" config forge.trustedCommit)" = "$good"
+
+p="$tmp/trust-noexec"; new_project "$p"
+chmod -x "$p/scripts/check_secrets.sh"; git -C "$p" add -A; git -C "$p" commit -qm "not executable"
+rejects "refuses a scanner that is not a tracked executable" "tracked executable" trust "$p" --yes HEAD
 
 for kind in absolute escaping; do
   p="$tmp/trust-bad-$kind"; new_project "$p"
