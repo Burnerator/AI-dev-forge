@@ -97,13 +97,40 @@ for c in "$new" ${old:+"$old"}; do
     while IFS= read -r r; do [[ -n "$r" ]] && files+=("$r"); done <<<"$resolved"
   done
 done
-# The policy must be self-contained: no [extend] path to an unreviewed file.
-if git cat-file -e "$new:.gitleaks.toml" 2>/dev/null && git cat-file -p "$new:.gitleaks.toml" | awk '
-    /^[[:space:]]*\[/ { in_extend = ($0 ~ /^[[:space:]]*\[extend\][[:space:]]*$/) }
-    in_extend && /^[[:space:]]*path[[:space:]]*=/ { found = 1 }
-    END { exit found ? 0 : 1 }'; then
-  echo "Not changed: .gitleaks.toml at ${new:0:12} uses [extend] path, which this review cannot cover." >&2
-  exit 1
+# policy_uses_extend_path <file>: parse the TOML for real (tomllib, Python
+# 3.11+) and succeed if it sets extend.path in any spelling. Exit 2 when no
+# parser is available: the caller fails closed.
+policy_uses_extend_path() {
+  local py
+  for py in python3 python3.14 python3.13 python3.12 python3.11; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    "$py" -I -c 'import tomllib' 2>/dev/null || continue
+    "$py" -I -c '
+import sys, tomllib
+try:
+    data = tomllib.load(open(sys.argv[1], "rb"))
+except Exception as exc:
+    print(f"invalid TOML: {exc}", file=sys.stderr)
+    sys.exit(3)
+ext = data.get("extend")
+sys.exit(0 if isinstance(ext, dict) and "path" in ext else 1)' "$1"
+    return $?
+  done
+  return 2
+}
+# The policy must be self-contained: no extend.path to an unreviewed file.
+if git cat-file -e "$new:.gitleaks.toml" 2>/dev/null; then
+  policy_tmp="$(mktemp)"
+  git cat-file -p "$new:.gitleaks.toml" >"$policy_tmp"
+  ep_status=0
+  policy_uses_extend_path "$policy_tmp" || ep_status=$?
+  rm -f "$policy_tmp"
+  case $ep_status in
+    0) echo "Not changed: .gitleaks.toml at ${new:0:12} uses [extend] path, which this review cannot cover." >&2; exit 1 ;;
+    1) ;;
+    2) echo "Not changed: validating .gitleaks.toml needs Python 3.11+ (tomllib)." >&2; exit 1 ;;
+    *) echo "Not changed: .gitleaks.toml at ${new:0:12} is not valid TOML." >&2; exit 1 ;;
+  esac
 fi
 # The scanner itself must end at a tracked executable.
 scanner_final="$(resolve "$new" scripts/check_secrets.sh | tail -1)"

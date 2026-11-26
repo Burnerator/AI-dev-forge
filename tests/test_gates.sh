@@ -259,6 +259,18 @@ printf '[extend]\nuseDefault = true\npath = "allow.toml"\n' > "$p/.gitleaks.toml
 rejects "refuses [extend] path in .gitleaks.toml" "uses \\[extend\\] path" secrets "$p"
 printf '[extend]\nuseDefault = true\n' > "$p/.gitleaks.toml"
 check "allows [extend] useDefault alone" secrets "$p"
+i=0
+for variant in '[extend] # comment\npath = "a.toml"' '["extend"]\n"path" = "a.toml"' 'extend.path = "a.toml"' 'extend = { path = "a.toml" }' '[ extend ]\n  path="a.toml"'; do
+  i=$((i + 1))
+  printf '%b\n' "$variant" > "$p/.gitleaks.toml"
+  rejects "refuses extend.path written another way (#$i)" "uses \\[extend\\] path" secrets "$p"
+done
+printf 'not = [valid toml\n' > "$p/.gitleaks.toml"
+rejects "refuses an invalid .gitleaks.toml" "not valid TOML" secrets "$p"
+printf '[extend]\nuseDefault = true\n' > "$p/.gitleaks.toml"
+nopy="$tmp/nopy"; mkdir -p "$nopy"
+for t in git bash env sh mktemp rm cat sed awk grep od tr head sort cut wc dirname basename find gitleaks printf; do w="$(command -v "$t" || true)"; [[ -n "$w" && "$w" == /* ]] && ln -sf "$w" "$nopy/$t"; done
+rejects "fails closed without a TOML parser" "needs Python 3.11" env PATH="$nopy" bash "$p/scripts/check_secrets.sh"
 
 p="$tmp/policy-link"; new_project "$p"
 echo 'title = "x"' > "$p/policy.toml"; ln -s policy.toml "$p/.gitleaks.toml"
@@ -479,6 +491,20 @@ git init -q --bare -b main "$p.second.git"; git -C "$p" remote add second "$p.se
 rm -f "$lfsmark"
 check "push to a second remote" env PATH="$lfsbin:$PATH" git -C "$p" push -q second main
 check "git lfs pre-push ran for history the second remote lacks" grep -q "^pre-push second" "$lfsmark"
+
+p="$tmp/push-lfs-pushurl"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"
+git -C "$p" add -A; git -C "$p" commit -qm "lfs pointer in an ancestor"
+git -C "$p" rm -q .gitattributes; git -C "$p" commit -qm "attributes removed"
+PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main # the fetch URL has it all
+git -C "$p" config forge.trustedCommit "$(git -C "$p" rev-parse main)"
+echo more > "$p/notes.txt"; git -C "$p" add notes.txt; git -C "$p" commit -qm "unrelated tip"
+git init -q --bare -b main "$p.push.git"
+git -C "$p" config remote.origin.pushurl "$p.push.git" # pushes go elsewhere
+rm -f "$lfsmark"
+check "push to a pushurl different from the fetch URL" env PATH="$lfsbin:$PATH" git -C "$p" push -q origin main
+check "git lfs pre-push ran despite tracking refs for the fetch URL" grep -q "refs/heads/main" "$lfsmark"
 
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main

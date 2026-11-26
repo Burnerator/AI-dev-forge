@@ -44,14 +44,38 @@ for f in .gitleaks.toml .gitleaksignore; do
     exit 1
   fi
 done
-# No [extend] path: rules or allowlists loaded from another file would escape
+# policy_uses_extend_path <file>: parse the TOML for real (tomllib, Python
+# 3.11+) and succeed if it sets extend.path in any spelling. Exit 2 when no
+# parser is available: the caller fails closed.
+policy_uses_extend_path() {
+  local py
+  for py in python3 python3.14 python3.13 python3.12 python3.11; do
+    command -v "$py" >/dev/null 2>&1 || continue
+    "$py" -I -c 'import tomllib' 2>/dev/null || continue
+    "$py" -I -c '
+import sys, tomllib
+try:
+    data = tomllib.load(open(sys.argv[1], "rb"))
+except Exception as exc:
+    print(f"invalid TOML: {exc}", file=sys.stderr)
+    sys.exit(3)
+ext = data.get("extend")
+sys.exit(0 if isinstance(ext, dict) and "path" in ext else 1)' "$1"
+    return $?
+  done
+  return 2
+}
+# No extend.path: rules or allowlists loaded from another file would escape
 # the pin review and the Code Owner paths. [extend] useDefault is fine.
-if [[ -f .gitleaks.toml ]] && awk '
-    /^[[:space:]]*\[/ { in_extend = ($0 ~ /^[[:space:]]*\[extend\][[:space:]]*$/) }
-    in_extend && /^[[:space:]]*path[[:space:]]*=/ { found = 1 }
-    END { exit found ? 0 : 1 }' .gitleaks.toml; then
-  echo "ERROR: .gitleaks.toml uses [extend] path; keep the whole policy in .gitleaks.toml." >&2
-  exit 1
+if [[ -f .gitleaks.toml ]]; then
+  ep_status=0
+  policy_uses_extend_path .gitleaks.toml || ep_status=$?
+  case $ep_status in
+    0) echo "ERROR: .gitleaks.toml uses [extend] path; keep the whole policy in .gitleaks.toml." >&2; exit 1 ;;
+    1) ;;
+    2) echo "ERROR: .gitleaks.toml needs Python 3.11+ (tomllib) to be validated; refusing to scan with an unchecked policy." >&2; exit 1 ;;
+    *) echo "ERROR: .gitleaks.toml is not valid TOML." >&2; exit 1 ;;
+  esac
 fi
 gl_config=()
 [[ -f .gitleaks.toml ]] && gl_config=(--config "$PWD/.gitleaks.toml")
