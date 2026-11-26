@@ -4,7 +4,7 @@
 
 Claude Code loads `CLAUDE.md`. The forge's `template/CLAUDE.md` contains a single import line, `@AGENTS.md`, so Claude Code reads the shared rules without duplicating them.
 
-The import works on every Claude Code version, so the forge relies on it rather than on Claude Code reading `AGENTS.md` directly.
+The forge relies on the `@AGENTS.md` import rather than on Claude Code reading `AGENTS.md` directly. Verified with Claude Code 2.1.330 (2026-11-26); if you use another version, run the smoke test in "Check that it works" below after installing.
 
 Put Claude-specific notes below the import line in `CLAUDE.md`. Put everything shared in `AGENTS.md`.
 

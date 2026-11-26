@@ -23,6 +23,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Installer refuses targets inside the forge checkout, and verifies (or with `--force` repairs) the `.claude/skills` link.
 - The secrets gate checks annotated tags, nested ones included (messages and tagger emails), and ignores inline `gitleaks:allow` comments.
 - `install.sh --force` overwrites the forge's skill files and keeps project-only files, and replaces a symlink in place of a skill directory.
+- Secrets gate scans commit messages; `--only` limits a scan to given revisions, used by CI so required checks depend only on the commit under test; CI checkouts no longer persist the job token.
 - Hook and gate ignore replacement objects (`GIT_NO_REPLACE_OBJECTS=1`); CI scans a pushed annotated tag explicitly.
 - Installer refuses to write through symlinked directories and never follows a symlinked destination.
 - CI actions pinned to a full commit SHA.

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # Secrets gate. Used by the pre-push hook and by CI.
 #
-# Usage: check_secrets.sh [<commit>...]
-#   Scans every ref (git log --all) plus any extra commits given as arguments.
-#   The pre-push hook passes the commits being pushed, so a commit that no local
-#   ref points to is scanned too.
+# Usage: check_secrets.sh [<commit-or-tag>...]
+#        check_secrets.sh --only <commit-or-tag>...
+#   Default: scans every local ref (git log --all, local tags included) plus the
+#   given revisions. The pre-push hook uses this, passing the pushed commits, so
+#   a commit that no local ref points to is scanned too.
+#   --only: scans just the history of the given revisions (and the given tags).
+#   CI uses this, so a required check depends only on the commit under test,
+#   not on unrelated branches or tags of the repository.
 #
 # What it checks:
 #   0) the clone is not shallow (otherwise older history would go unchecked)
@@ -12,7 +16,8 @@
 #   2) gitleaks finds no secrets in any scanned commit, including changes that only
 #      exist in a merge commit (conflict resolutions) and files git treats as binary.
 #      Only a count and commit IDs are printed, never gitleaks' raw findings.
-#   3) annotated tags (arguments and local refs/tags): no secrets in the message
+#   3) no secrets in commit messages (gitleaks only reads patches)
+#   3b) annotated tags (arguments and, by default, local refs/tags): no secrets in the message
 #   4) every author, committer and tagger email is a GitHub noreply address
 # What it cannot do: detect arbitrary personal data in file contents or commit
 # messages. That still needs a human read of every diff before publishing.
@@ -32,6 +37,16 @@ if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
   exit 1
 fi
 
+scope=(--all)
+if [[ "${1:-}" == "--only" ]]; then
+  shift
+  scope=()
+  if [[ $# -eq 0 ]]; then
+    echo "ERROR: --only needs at least one revision." >&2
+    exit 1
+  fi
+fi
+
 revs=()
 tags=() # annotated tag objects among the arguments
 for rev in "$@"; do
@@ -43,17 +58,19 @@ for rev in "$@"; do
   obj=$(git rev-parse --verify --quiet "$rev")
   [[ "$(git cat-file -t "$obj")" == "tag" ]] && tags+=("$obj")
 done
-# Every local annotated tag too: tags are pushed with --tags/--follow-tags.
-while IFS= read -r obj; do
-  [[ -n "$obj" ]] && tags+=("$obj")
-done < <(git for-each-ref --format='%(if:equals=tag)%(objecttype)%(then)%(objectname)%(end)' refs/tags)
+# Every local annotated tag too (default scope): tags are pushed with --tags/--follow-tags.
+if [[ ${#scope[@]} -gt 0 ]]; then
+  while IFS= read -r obj; do
+    [[ -n "$obj" ]] && tags+=("$obj")
+  done < <(git for-each-ref --format='%(if:equals=tag)%(objecttype)%(then)%(objectname)%(end)' refs/tags)
+fi
 
 echo "==> .env files in history (incl. merge commits)"
 # NUL-delimited paths: no quoting of special characters, so nothing can hide.
 paths_file="$(mktemp)"
 trap 'rm -f "$paths_file"' EXIT
 # A failed git log must abort, never look like "no matches".
-git log --all -m --name-only -z --format= ${revs[@]+"${revs[@]}"} >"$paths_file" \
+git log ${scope[@]+"${scope[@]}"} -m --name-only -z --format= ${revs[@]+"${revs[@]}"} >"$paths_file" \
   || { echo "ERROR: git log failed" >&2; exit 1; }
 env_count=0
 while IFS= read -r -d '' path; do
@@ -76,8 +93,10 @@ if ! command -v gitleaks >/dev/null 2>&1; then
 fi
 # -m: include merge diffs (default gitleaks log options skip them).
 # --text: include the contents of files git classifies as binary.
-log_opts="--all -m --text"
-[[ ${#revs[@]} -gt 0 ]] && log_opts+=" ${revs[*]}"
+# Built without stray spaces: gitleaks splits this string, and an empty word
+# becomes an empty pathspec that makes git log scan nothing.
+log_words=(${scope[@]+"${scope[@]}"} -m --text ${revs[@]+"${revs[@]}"})
+log_opts="${log_words[*]}"
 report="$(mktemp)"
 trap 'rm -f "$paths_file" "$report"' EXIT
 gl_status=0
@@ -107,6 +126,22 @@ elif [[ $gl_status -eq 3 ]]; then
   grep -oE '"Commit": *"[0-9a-f]+"' "$report" | grep -oE '[0-9a-f]{40}' | sort -u | cut -c1-12 | sed 's/^/  /' >&2
   echo "Inspect locally: gitleaks git -v --log-opts=\"$log_opts\" ." >&2
   echo "Fix: revoke the key at the provider first, then clean history." >&2
+  fail=1
+fi
+
+echo "==> commit messages"
+# gitleaks reads patches, not commit messages, so scan the messages separately.
+msg_status=0
+git log ${scope[@]+"${scope[@]}"} --format='%B%x00' ${revs[@]+"${revs[@]}"} \
+  | gitleaks stdin --redact --no-banner --no-color --exit-code 3 --ignore-gitleaks-allow \
+    --report-format json --report-path "$report" >/dev/null 2>&1 || msg_status=$?
+if [[ $msg_status -eq 3 ]]; then
+  echo "ERROR: commit messages contain $(grep -c '"RuleID"' "$report" || true) secret(s) (not shown)." >&2
+  echo "Inspect locally: git log --format='%h %s' | gitleaks stdin -v" >&2
+  echo "Fix: revoke the key at the provider first, then reword the commit." >&2
+  fail=1
+elif [[ $msg_status -ne 0 ]]; then
+  echo "ERROR: gitleaks failed on commit messages (exit $msg_status); the scan cannot be trusted." >&2
   fail=1
 fi
 
@@ -141,7 +176,7 @@ if [[ $tag_leaks -gt 0 ]]; then
 fi
 
 echo "==> commit and tagger identities"
-identities=$(git log --all --format='%ae%n%ce' ${revs[@]+"${revs[@]}"}) || { echo "ERROR: git log failed" >&2; exit 1; }
+identities=$(git log ${scope[@]+"${scope[@]}"} --format='%ae%n%ce' ${revs[@]+"${revs[@]}"}) || { echo "ERROR: git log failed" >&2; exit 1; }
 identities+=$'\n'"$tagger_emails"
 bad=$(printf '%s\n' "$identities" | sort -u \
   | grep -v '^$' \

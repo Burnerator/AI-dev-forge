@@ -172,6 +172,31 @@ tagobj="$(git -C "$p" rev-parse v9)"
 git -C "$p" update-ref -d refs/tags/v9 # as in a CI checkout: only what is passed explicitly
 rejects "rejects a tag passed explicitly (CI tag push) with a personal tagger" "non-noreply email" secrets "$p" "$tagobj"
 
+p="$tmp/msg-secret"; new_project "$p"
+echo x > "$p/x"; git -C "$p" add x
+git -C "$p" commit -qm "deploy with token $(fake_token)"
+rejects "finds a secret that only exists in a commit message" "commit messages contain [0-9]+ secret" secrets "$p"
+
+p="$tmp/scope"; new_project "$p"
+git -C "$p" switch -qc unrelated
+echo "X=1" > "$p/.env"; git -C "$p" add -f .env; git -C "$p" commit -qm "env elsewhere"
+git -C "$p" switch -q main
+rejects "default scope sees every local branch" "$ENV" secrets "$p"
+check "--only ignores unrelated branches (CI on a clean commit)" secrets "$p" --only main
+rejects "--only still scans the given history" "$ENV" secrets "$p" --only unrelated
+rejects "--only without revisions is refused" "needs at least one revision" secrets "$p" --only
+
+# A fake gitleaks first in PATH, to prove the gate fails closed.
+fakebin="$tmp/fakebin"; mkdir -p "$fakebin"
+with_fake_scanner() { (cd "$1" && PATH="$fakebin:$PATH" ./scripts/check_secrets.sh); }
+p="$tmp/fake-scanner"; new_project "$p"
+printf '#!/usr/bin/env bash\necho "something broke" >&2\nexit 2\n' > "$fakebin/gitleaks"; chmod +x "$fakebin/gitleaks"
+rejects "fails closed when gitleaks exits with an error" "gitleaks failed to run" with_fake_scanner "$p"
+printf '#!/usr/bin/env bash\necho "0 commits scanned."\nexit 0\n' > "$fakebin/gitleaks"
+rejects "fails closed when gitleaks scans zero commits" "scanned no commits" with_fake_scanner "$p"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/gitleaks"
+rejects "fails closed when gitleaks reports nothing at all" "scanned no commits" with_fake_scanner "$p"
+
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
 rejects "refuses a first push without explicit bootstrap" "no reviewed scanner yet" git -C "$p" push origin main
@@ -263,6 +288,12 @@ printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
 rejects_all "never runs code from the push destination" "scanner from refs/remotes/origin/main" "$LEAK" git -C "$p" push origin main
 check "the destination's scanner never ran" test ! -e "$marker"
+
+p="$tmp/push-msg"; new_project "$p"
+FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
+rejects "blocks a push whose only secret is in a commit message" "commit messages contain" git -C "$p" push origin main
+check "the commit did not reach the remote" test "$(git -C "$p.remote.git" rev-parse main)" != "$(git -C "$p" rev-parse main)"
 
 p="$tmp/push-tag"; new_project "$p"
 FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
