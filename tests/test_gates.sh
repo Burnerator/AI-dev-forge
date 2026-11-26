@@ -197,6 +197,15 @@ rejects "fails closed when gitleaks scans zero commits" "scanned no commits" wit
 printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/gitleaks"
 rejects "fails closed when gitleaks reports nothing at all" "scanned no commits" with_fake_scanner "$p"
 
+p="$tmp/tag-ci"; new_project "$p"
+git -C "$p" tag -a v1 -m "release"
+pushed="$(git -C "$p" rev-parse v1)"
+check "--tag passes when the tag is the object from the push event" secrets "$p" --tag refs/tags/v1 "$pushed"
+git -C "$p" -c user.email=someone@example.com tag -f -a v1 -m "moved" >/dev/null # tag moved after the push
+rejects "--tag fails when the tag has moved since the push event" "now points to .* not ${pushed:0:12}" secrets "$p" --tag refs/tags/v1 "$pushed"
+rejects "--tag fails when the tag is missing" "not available in this checkout" secrets "$p" --tag refs/tags/nope "$pushed"
+rejects "--tag needs both arguments" "needs <tag-ref> <expected-object-id>" secrets "$p" --tag refs/tags/v1
+
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
 rejects "refuses a first push without explicit bootstrap" "no reviewed scanner yet" git -C "$p" push origin main

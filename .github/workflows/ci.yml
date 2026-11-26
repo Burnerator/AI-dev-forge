@@ -35,12 +35,10 @@ jobs:
       - name: Secrets gate on the pushed tag (message and tagger identity)
         if: github.ref_type == 'tag'
         env:
-          TOKEN: ${{ github.token }}
-        run: |
-          # The tag object itself, not only its commit. The token is used for this
-          # fetch only and is not persisted for the script below.
-          git -c "http.extraheader=AUTHORIZATION: bearer $TOKEN" fetch --no-tags origin "+$GITHUB_REF:$GITHUB_REF"
-          ./scripts/check_secrets.sh --only "$GITHUB_REF"
+          # The object the push event reported. fetch-depth: 0 above already
+          # fetched the tag objects; the gate fails if the tag has since moved.
+          PUSHED_OBJECT: ${{ github.event.after }}
+        run: ./scripts/check_secrets.sh --tag "$GITHUB_REF" "$PUSHED_OBJECT"
 
   checks:
     strategy:

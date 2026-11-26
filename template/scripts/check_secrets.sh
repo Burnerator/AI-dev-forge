@@ -6,7 +6,10 @@
 #   Default: scans every local ref (git log --all, local tags included) plus the
 #   given revisions. The pre-push hook uses this, passing the pushed commits, so
 #   a commit that no local ref points to is scanned too.
+#        check_secrets.sh --tag <tag-ref> <expected-object-id>
 #   --only: scans just the history of the given revisions (and the given tags).
+#   --tag: CI on a tag push. Verifies that <tag-ref> still resolves to the exact
+#   object the push event reported (a moved tag fails), then scans it as --only.
 #   CI uses this, so a required check depends only on the commit under test,
 #   not on unrelated branches or tags of the repository.
 #
@@ -38,6 +41,21 @@ if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
 fi
 
 scope=(--all)
+if [[ "${1:-}" == "--tag" ]]; then
+  if [[ $# -ne 3 ]]; then
+    echo "ERROR: --tag needs <tag-ref> <expected-object-id>." >&2
+    exit 1
+  fi
+  actual=$(GIT_NO_REPLACE_OBJECTS=1 git rev-parse --verify --quiet "$2") || {
+    echo "ERROR: tag $2 is not available in this checkout." >&2
+    exit 1
+  }
+  if [[ "$actual" != "$3" ]]; then
+    echo "ERROR: tag $2 now points to ${actual:0:12}, not ${3:0:12} from the push event (moved?)." >&2
+    exit 1
+  fi
+  set -- --only "$3"
+fi
 if [[ "${1:-}" == "--only" ]]; then
   shift
   scope=()

@@ -44,8 +44,8 @@ Keep it short. A reviewer should understand the PR in under a minute.
 ## 4. Open it
 
 - Push the branch: `git push -u origin <branch>`.
-- Open the PR with the GitHub MCP server or `gh pr create --title "<conventional-commit-style title>" --body-file <file>`.
-- Open it as a **draft** unless the developer says it is ready for review.
+- Open it as a **draft** unless the developer says it is ready for review: `gh pr create --draft --title "<conventional-commit-style title>" --body-file <file>`, or with the GitHub MCP server's create-pull-request tool with its draft option set to true.
+- Drop `--draft` (or the draft option) only when the developer explicitly says the PR is ready.
 - Do not request reviewers, add labels or merge unless asked.
 
 Report the PR URL to the developer when done.

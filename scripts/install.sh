@@ -90,12 +90,28 @@ copy_file() {
   echo "  write   ${dest#"$TARGET"/}"
 }
 
+# Preflight: check every destination before writing anything, so a refusal
+# (for example a symlinked directory) never leaves a half-installed project.
+rules=(AGENTS.md CLAUDE.md .mcp.json .vscode/mcp.json
+  .githooks/pre-push scripts/check.sh scripts/check_secrets.sh
+  .github/workflows/forge-gates.yml .github/pull_request_template.md)
+for rel in "${rules[@]}"; do safe_parents "$TARGET/$rel"; done
+for skill_dir in "$FORGE_DIR"/skills/*/; do
+  [[ -f "$skill_dir/SKILL.md" ]] || continue
+  name="$(basename "$skill_dir")"
+  safe_parents "$TARGET/.agents/skills/$name"
+  if [[ ! -L "$TARGET/.agents/skills/$name" ]]; then
+    while IFS= read -r -d '' src; do
+      safe_parents "$TARGET/.agents/skills/$name/${src#"$skill_dir"}"
+    done < <(find "$skill_dir" -type f -print0)
+  fi
+done
+safe_parents "$TARGET/.claude/skills"
+
 echo "Installing AI-dev-forge into $TARGET"
 
 echo "Rules, MCP configs and gates:"
-for rel in AGENTS.md CLAUDE.md .mcp.json .vscode/mcp.json \
-  .githooks/pre-push scripts/check.sh scripts/check_secrets.sh \
-  .github/workflows/forge-gates.yml .github/pull_request_template.md; do
+for rel in "${rules[@]}"; do
   copy_file "$FORGE_DIR/template/$rel" "$TARGET/$rel"
 done
 

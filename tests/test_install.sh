@@ -63,8 +63,12 @@ echo "symlinks never redirect writes outside the project"
 out_dir="$tmp/outside"; mkdir -p "$out_dir"
 echo "sentinel" > "$out_dir/AGENTS.md"
 p="$tmp/linked-parent"; mkdir "$p"; ln -s "$out_dir" "$p/scripts"
+echo "mine" > "$p/AGENTS.md"
+tree_before="$(snapshot "$p")"
 refuses "rejects a symlinked parent directory" "$install" "$p"
 refuses "rejects a symlinked parent directory with --force" "$install" --force "$p"
+check "a refused install changes nothing in the project (preflight)" test "$(snapshot "$p")" = "$tree_before"
+check "earlier files were not replaced before the refusal" test "$(cat "$p/AGENTS.md")" = mine
 check "nothing written outside through the parent link" test "$(ls "$out_dir")" = AGENTS.md
 p="$tmp/linked-file"; mkdir "$p"; ln -s "$out_dir/AGENTS.md" "$p/AGENTS.md"
 "$install" "$p" >/dev/null
