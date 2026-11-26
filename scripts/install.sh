@@ -118,8 +118,18 @@ done
 echo "Claude Code skills link (.claude/skills -> ../.agents/skills):"
 link="$TARGET/.claude/skills"
 safe_parents "$link"
-if [[ -L "$link" ]]; then
-  echo "  ok      .claude/skills is already a symlink"
+if [[ -L "$link" && "$(readlink "$link")" == "../.agents/skills" ]]; then
+  echo "  ok      .claude/skills already links to ../.agents/skills"
+elif [[ -L "$link" ]]; then
+  if [[ $FORCE -eq 1 ]]; then
+    old_target="$(readlink "$link")"
+    run rm -f "$link"
+    run ln -s ../.agents/skills "$link"
+    echo "  link    .claude/skills (replaced a link to '$old_target')"
+  else
+    echo "  warn    .claude/skills links to '$(readlink "$link")', not ../.agents/skills."
+    echo "          Claude Code will not see the forge skills. Re-run with --force to fix the link."
+  fi
 elif [[ -e "$link" ]]; then
   echo "  skip    .claude/skills exists and is not a symlink."
   echo "          Move its skills into .agents/skills, remove it, and re-run."

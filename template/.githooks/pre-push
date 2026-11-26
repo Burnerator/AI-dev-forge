@@ -20,6 +20,9 @@
 # Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
 remote="${1:-}"
+# Git passes the URL it is actually pushing to; it can differ from the fetch URL
+# (remote.<name>.pushurl), so the trusted scanner is always resolved from it.
+push_url="${2:-$remote}"
 repo_root="$(git rev-parse --show-toplevel)"
 zero="0000000000000000000000000000000000000000"
 
@@ -66,9 +69,9 @@ if [[ -n "$configured" ]]; then
     exit 1
   }
   trusted_name="$configured"
-elif [[ -n "$remote" ]]; then
-  if ! symref="$(git -C "$repo_root" ls-remote --symref "$remote" HEAD 2>/dev/null)"; then
-    echo "pre-push: cannot ask '$remote' for its default branch; push aborted." >&2
+elif [[ -n "$push_url" ]]; then
+  if ! symref="$(git -C "$repo_root" ls-remote --symref "$push_url" HEAD 2>/dev/null)"; then
+    echo "pre-push: cannot ask the push destination for its default branch; push aborted." >&2
     echo "  Set one explicitly: git config forge.trustedRef refs/remotes/$remote/<default-branch>" >&2
     exit 1
   fi
@@ -78,13 +81,17 @@ elif [[ -n "$remote" ]]; then
     bootstrap=1 # empty remote: nothing reviewed exists yet
   else
     if ! git -C "$repo_root" cat-file -e "${default_sha}^{commit}" 2>/dev/null; then
-      git -C "$repo_root" fetch --quiet --no-tags "$remote" "$default_ref" || {
-        echo "pre-push: cannot fetch $default_ref from '$remote'; push aborted." >&2
+      git -C "$repo_root" fetch --quiet --no-tags "$push_url" "$default_ref" || {
+        echo "pre-push: cannot fetch $default_ref from the push destination; push aborted." >&2
         exit 1
       }
     fi
+    if ! git -C "$repo_root" cat-file -e "${default_sha}^{commit}" 2>/dev/null; then
+      echo "pre-push: the push destination's $default_ref is not available locally; push aborted." >&2
+      exit 1
+    fi
     trusted="$default_sha"
-    trusted_name="$remote ${default_ref#refs/heads/}"
+    trusted_name="${remote:-destination} ${default_ref#refs/heads/}"
   fi
 else
   echo "pre-push: unknown remote; set forge.trustedRef to choose the trusted scanner. Push aborted." >&2

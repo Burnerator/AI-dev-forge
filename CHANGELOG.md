@@ -19,6 +19,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Secrets gate scans merge diffs (`git log -m`), reads paths NUL-delimited, scans commits passed by the hook even when no ref points to them, fails closed if gitleaks errors or scans nothing, and rejects shallow clones.
 - `pre-push` never uses the working copy's scanner: it runs the secrets gate committed on the remote's default branch, as reported by the remote itself (or `forge.trustedRef`), and fails closed when it cannot resolve it. Bootstrap needs an explicit `FORGE_BOOTSTRAP=1`.
 - Secrets gate scans the contents of binary files (`--text`), distinguishes findings from operational errors, and prints only a count and commit IDs, never raw findings.
-- Installer refuses targets inside the forge checkout.
+- Installer refuses targets inside the forge checkout, and verifies (or with `--force` repairs) the `.claude/skills` link.
+- `pre-push` resolves the trusted scanner from the push URL; the secrets gate checks annotated tags (messages and tagger emails) and ignores inline `gitleaks:allow` comments.
 - Installer refuses to write through symlinked directories and never follows a symlinked destination.
 - CI actions pinned to a full commit SHA.

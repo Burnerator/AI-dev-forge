@@ -31,6 +31,17 @@ rejects() {
     tail -n 8 <<<"$out" | sed 's/^/         | /' >&2
   else pass "$desc"; fi
 }
+# rejects_all <description> <pattern1> <pattern2> <command...>: like rejects, but
+# both diagnostics must appear.
+rejects_all() {
+  local desc="$1" p1="$2" p2="$3" out status=0; shift 3
+  out="$("$@" 2>&1)" || status=$?
+  if [[ $status -eq 0 ]]; then fail "$desc" "command succeeded"
+  elif ! grep -qE "$p1" <<<"$out" || ! grep -qE "$p2" <<<"$out"; then
+    fail "$desc" "missing diagnostic /$p1/ and /$p2/"
+    tail -n 8 <<<"$out" | sed 's/^/         | /' >&2
+  else pass "$desc"; fi
+}
 no_remote_ref() { ! git -C "$1" rev-parse --verify -q "$2" >/dev/null; }
 
 # Bounded read: git ignores SIGPIPE in hooks, so an unbounded `tr </dev/urandom | head`
@@ -118,6 +129,19 @@ check "never prints the author's email" test -z "$(grep -i 'private.person@examp
 check "never prints the author's name" test -z "$(grep -i 'Private Person' <<<"$out")"
 check "never prints the file path" test -z "$(grep -i 'secret path name' <<<"$out")"
 
+p="$tmp/allow-comment"; new_project "$p"
+printf 'token = "%s" # gitleaks:allow\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "allow comment"
+rejects "an inline gitleaks:allow comment does not suppress a finding" "$LEAK" secrets "$p"
+
+p="$tmp/tag-identity"; new_project "$p"
+git -C "$p" -c user.email=someone@example.com tag -a v1 -m "release"
+rejects "rejects an annotated tag with a personal tagger email" "non-noreply email" secrets "$p"
+
+p="$tmp/tag-secret"; new_project "$p"
+git -C "$p" tag -a v1 -m "release notes: token $(fake_token)"
+rejects "finds a secret in an annotated tag message" "annotated tag\(s\) contain secrets" secrets "$p"
+
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
 rejects "refuses a first push without explicit bootstrap" "no reviewed scanner yet" git -C "$p" push origin main
@@ -174,7 +198,7 @@ git -C "$p" switch -qc feat/x
 printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh"
 printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add -A; git -C "$p" commit -qm "weaken scanner and add config"
-rejects "asks the remote for a non-standard default branch (trunk)" "scanner from origin trunk" git -C "$p" push origin feat/x
+rejects_all "asks the remote for a non-standard default branch (trunk), and the trunk scanner finds the secret" "scanner from origin trunk @ $(git -C "$p" rev-parse --short=7 trunk)" "$LEAK" git -C "$p" push origin feat/x
 check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/x
 
 p="$tmp/push-stale"; new_project "$p"
@@ -188,6 +212,30 @@ printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add -A; git -C "$p" commit -qm "add config"
 rejects "ignores a wrong local tracking ref, uses what the remote reports" "scanner from origin main @ ${good:0:7}" git -C "$p" push origin feat/y
 check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/y
+
+p="$tmp/push-ignorefile"; new_project "$p"
+FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+git -C "$p" switch -qc feat/ignore
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+echo "$(git -C "$p" rev-parse HEAD):config.txt:github-pat:1" > "$p/.gitleaksignore"
+git -C "$p" add .gitleaksignore; git -C "$p" commit -qm "ignore it"
+check "fixture: the branch's ignore file would silence the finding" secrets "$p"
+rejects_all "a .gitleaksignore committed on the branch does not silence the trusted scan" "scanner from origin main" "$LEAK" git -C "$p" push origin feat/ignore
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/ignore
+
+p="$tmp/push-url"; new_project "$p"
+FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main # fetch URL now has a reviewed scanner
+git init -q --bare -b main "$tmp/push-url.other.git"
+git -C "$p" config remote.origin.pushurl "$tmp/push-url.other.git"
+rejects "resolves the scanner from the push URL, not the fetch URL" "no reviewed scanner yet" git -C "$p" push origin main
+check "nothing reached the push destination" no_remote_ref "$tmp/push-url.other.git" refs/heads/main
+
+p="$tmp/push-tag"; new_project "$p"
+FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+git -C "$p" -c user.email=someone@example.com tag -a v1 -m "release"
+rejects "blocks pushing an annotated tag with a personal tagger email" "non-noreply email" git -C "$p" push origin v1
+check "the tag did not reach the remote" no_remote_ref "$p.remote.git" refs/tags/v1
 
 if [[ $fails -ne 0 ]]; then
   echo "$fails test(s) failed" >&2

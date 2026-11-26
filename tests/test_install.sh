@@ -79,6 +79,15 @@ p="$tmp/linked-agents"; mkdir "$p"; ln -s "$out_dir" "$p/.agents"
 refuses "rejects a symlinked .agents directory" "$install" "$p"
 check "no skills written outside" test ! -e "$out_dir/skills"
 
+echo ".claude/skills link is verified"
+p="$tmp/stale-link"; mkdir -p "$p/.claude"; ln -s /nonexistent/skills "$p/.claude/skills"
+out="$("$install" "$p")"
+check "warns about a link to somewhere else" grep -q "warn    .claude/skills links to '/nonexistent/skills'" <<<"$out"
+check "leaves it alone without --force" test "$(readlink "$p/.claude/skills")" = /nonexistent/skills
+"$install" --force "$p" >/dev/null
+check "--force repoints the link" test "$(readlink "$p/.claude/skills")" = ../.agents/skills
+check "skills visible after the repair" test -f "$p/.claude/skills/code-review/SKILL.md"
+
 echo "refusals"
 refuses "rejects missing directory" "$install" "$tmp/nope"
 refuses "rejects installing into the forge" "$install" "$forge"
