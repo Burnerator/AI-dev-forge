@@ -36,6 +36,9 @@ check "check.sh is executable" test -x "$p/scripts/check.sh"
 check "check_secrets.sh is executable" test -x "$p/scripts/check_secrets.sh"
 refuses "check.sh placeholder fails until configured" "$p/scripts/check.sh"
 
+mkdir -p "$tmp/steps"; steps="$("$install" "$tmp/steps" | sed -n '/Next steps/,$p')"
+check "next steps: bootstrap push comes before pinning" test "$(grep -n 'FORGE_BOOTSTRAP=1' <<<"$steps" | head -1 | cut -d: -f1)" -lt "$(grep -n 'trust-scanner.sh' <<<"$steps" | head -1 | cut -d: -f1)"
+
 echo "idempotent"
 before="$(snapshot "$p")"
 out="$("$install" "$p")"

@@ -97,21 +97,31 @@ chain_existing_hooks() {
   if git -C "$repo_root" config --get-regexp '^filter\.lfs\.' >/dev/null 2>&1; then
     uses_lfs=1
   fi
-  # LFS attributes of what is pushed, not of the checked-out branch.
-  for tip in ${shas[@]+"${shas[@]}"}; do
-    if git -C "$repo_root" grep -q 'filter=lfs' "$tip" -- .gitattributes '*/.gitattributes' 2>/dev/null; then
+  # LFS anywhere in the outgoing history (attributes or pointer files), not
+  # just at the pushed tips or in the checked-out branch.
+  if [[ $uses_lfs -eq 0 && ${#shas[@]} -gt 0 ]]; then
+    if [[ -n "$(git -C "$repo_root" log --format=%H -1 -G 'filter=lfs' "${shas[@]}" --not --remotes -- .gitattributes '*/.gitattributes' 2>/dev/null)" ]] \
+      || [[ -n "$(git -C "$repo_root" log --format=%H -1 -G '^version https://git-lfs.github.com/spec/v1' "${shas[@]}" --not --remotes 2>/dev/null)" ]]; then
       uses_lfs=1
     fi
-  done
+    for tip in "${shas[@]}"; do # attributes present at a tip, even if already on a remote
+      if git -C "$repo_root" grep -q 'filter=lfs' "$tip" -- .gitattributes '*/.gitattributes' 2>/dev/null; then
+        uses_lfs=1
+      fi
+    done
+  fi
   if [[ -x "$legacy" ]]; then
     echo "pre-push: running the previous pre-push hook ($legacy)..."
     printf '%s\n' ${input_lines[@]+"${input_lines[@]}"} | "$legacy" "$@" || {
       echo "pre-push: the previous pre-push hook failed, push aborted." >&2
       exit 1
     }
-  elif [[ $uses_lfs -eq 1 ]]; then
+  fi
+  # Always, when LFS is in use, even if a previous hook ran: that hook may not
+  # be LFS's, and running git lfs pre-push twice is harmless.
+  if [[ $uses_lfs -eq 1 ]]; then
     if ! command -v git-lfs >/dev/null 2>&1; then
-      echo "pre-push: this repository uses Git LFS but git-lfs is not installed; push aborted." >&2
+      echo "pre-push: this push contains Git LFS content but git-lfs is not installed; push aborted." >&2
       exit 1
     fi
     echo "pre-push: running git lfs pre-push..."

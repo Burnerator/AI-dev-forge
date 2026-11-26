@@ -130,7 +130,8 @@ fi
 # --text: include the contents of files git classifies as binary.
 # Built without stray spaces: gitleaks splits this string, and an empty word
 # becomes an empty pathspec that makes git log scan nothing.
-log_words=(${scope[@]+"${scope[@]}"} --root -m --text ${revs[@]+"${revs[@]}"})
+# --no-textconv/--no-ext-diff: scan the stored bytes, never a diff driver's view.
+log_words=(${scope[@]+"${scope[@]}"} --root -m --text --no-textconv --no-ext-diff ${revs[@]+"${revs[@]}"})
 log_opts="${log_words[*]}"
 report="$(mktemp)"
 trap 'rm -f "$paths_file" "$report"' EXIT

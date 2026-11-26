@@ -113,6 +113,14 @@ mkdir -p "$p/config/deep"; echo "X=1" > "$p/config/deep/.env.production"; echo "
 git -C "$p" add -f config; git -C "$p" commit -qm nested
 rejects "finds nested .env.production and .envrc" "2 occurrence" secrets "$p"
 
+p="$tmp/textconv"; new_project "$p"
+echo '*.txt diff=hide' > "$p/.gitattributes"
+git -C "$p" config diff.hide.textconv "sed -e s/ghp_[0-9a-f]*/REDACTED/"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/a.txt"
+git -C "$p" add -A; git -C "$p" commit -qm "add a.txt"
+check "fixture: plain git log -p shows the driver's view, without the token" test -z "$(git -C "$p" log -p | grep ghp_)"
+rejects "scans the stored bytes, not a textconv driver's view" "$LEAK" secrets "$p"
+
 p="$tmp/example"; new_project "$p"
 echo "X=" > "$p/.env.example"; git -C "$p" add .env.example; git -C "$p" commit -qm example
 check "allows .env.example" secrets "$p"
@@ -414,6 +422,28 @@ rm -f "$lfsmark"
 check "push an LFS branch from a non-LFS checkout" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin lfs-branch
 check "git lfs pre-push ran for the pushed LFS branch" grep -q "refs/heads/lfs-branch" "$lfsmark"
 
+if command -v git-lfs >/dev/null 2>&1; then
+  # Real LFS: the object must be downloadable from the destination afterwards,
+  # with an unrelated previous hook present (both must run).
+  p="$tmp/push-lfs-real"; new_project "$p"
+  git -C "$p" lfs install --local --skip-repo >/dev/null
+  marker="$tmp/lfs-real-legacy.ran"
+  printf '#!/usr/bin/env bash\ntouch "%s"\n' "$marker" > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks/pre-push"
+  (cd "$p" && git lfs track "*.bin" >/dev/null)
+  printf 'real-lfs-payload-%s\n' "$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')" > "$p/big.bin"
+  payload="$(cat "$p/big.bin")"
+  git -C "$p" add .gitattributes big.bin; git -C "$p" commit -qm "add an LFS object"
+  check "fixture: git stores a pointer, not the payload" grep -q '^version https://git-lfs' <(git -C "$p" cat-file -p HEAD:big.bin)
+  check "push with LFS and an unrelated previous hook" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+  check "the unrelated previous hook ran" test -f "$marker"
+  q="$tmp/push-lfs-real.clone"
+  git -c filter.lfs.smudge="git-lfs smudge -- %f" -c filter.lfs.process="git-lfs filter-process" -c filter.lfs.required=true clone -q "$p.remote.git" "$q" 2>/dev/null || true
+  (cd "$q" && git lfs install --local --skip-repo >/dev/null && git lfs pull >/dev/null 2>&1) || true
+  check "a fresh clone gets the real LFS object from the destination" test "$(cat "$q/big.bin" 2>/dev/null)" = "$payload"
+else
+  echo "  skip real LFS round trip (git-lfs not installed)"
+fi
+
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main
 echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
@@ -488,6 +518,16 @@ check "the pin is untouched (directory escape)" test "$(git -C "$p" config forge
 p="$tmp/trust-noexec"; new_project "$p"
 chmod -x "$p/scripts/check_secrets.sh"; git -C "$p" add -A; git -C "$p" commit -qm "not executable"
 rejects "refuses a scanner that is not a tracked executable" "tracked executable" trust "$p" --yes HEAD
+
+p="$tmp/trust-binary"; new_project "$p"
+trust "$p" --yes HEAD >/dev/null
+echo 'scripts/check_secrets.sh binary diff=hide' > "$p/.gitattributes"
+git -C "$p" config diff.hide.textconv "sed -e /hidden-change/d"
+printf '\n# hidden-change\n' >> "$p/scripts/check_secrets.sh"
+git -C "$p" add -A; git -C "$p" commit -qm "scanner marked binary with a textconv"
+check "fixture: plain git diff hides the change" test -z "$(git -C "$p" diff HEAD~1 HEAD -- scripts/check_secrets.sh | grep '^+.*hidden-change')"
+out="$(trust "$p" --yes HEAD)"
+check "the pin diff shows the literal change despite binary/textconv" grep -q '^+# hidden-change' <<<"$out"
 
 for kind in absolute escaping; do
   p="$tmp/trust-bad-$kind"; new_project "$p"

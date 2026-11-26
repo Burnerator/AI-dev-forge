@@ -188,14 +188,18 @@ fi
 
 cat <<'EOF'
 
-Done. Next steps:
-  1. Edit AGENTS.md: fill in the PROJECT sections (build/test commands, style).
-  2. Put your real lint + test commands in scripts/check.sh (it fails until you do).
-  3. Enable the hook in each clone: git config core.hooksPath .githooks
-     and pin the scanner it trusts (after reading it):
-     scripts/trust-scanner.sh refs/remotes/origin/main
-     (needs gitleaks: https://github.com/gitleaks/gitleaks#installing)
-  4. Set GITHUB_PAT in your environment for the GitHub MCP server.
-  5. Commit the new files, then protect main and require the forge-gates
-     checks (see docs/enforcement.md in AI-dev-forge).
+Done. Next steps (details in the AI-dev-forge README):
+  1. Set a GitHub noreply commit email, and run ./scripts/check_secrets.sh
+     on the existing history (needs gitleaks and a full clone).
+  2. Edit AGENTS.md (PROJECT sections) and put your real lint + test
+     commands in scripts/check.sh (it fails until you do).
+  3. Enable the hook: git config core.hooksPath .githooks
+     (had a custom hooks path before? git config forge.previousHook <old>/pre-push)
+  4. Commit on a branch and push it once with bootstrap, since nothing
+     reviewed exists yet: FORGE_BOOTSTRAP=1 git push -u origin <branch>
+  5. Open the pull request; merge it after review.
+  6. After the merge, pin the reviewed scanner in each clone:
+     git fetch origin && scripts/trust-scanner.sh refs/remotes/origin/main
+  7. Protect main and require the forge-gates checks (docs/enforcement.md).
+  8. Set GITHUB_PAT in your environment for the GitHub MCP server.
 EOF

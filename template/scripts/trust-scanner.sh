@@ -115,15 +115,17 @@ if [[ -n "$old" ]] && git cat-file -e "${old}^{commit}" 2>/dev/null; then
     exit 0
   fi
   echo "Scanner changes from the pinned ${old:0:12} to ${new:0:12}:"
-  git --no-pager diff --stat "$old" "$new" -- "${files[@]}"
-  git --no-pager diff "$old" "$new" -- "${files[@]}"
+  # Literal text: no binary attribute, no external diff, no textconv can hide
+  # or transform what the scanner really contains.
+  git --no-pager -c diff.external= diff --no-ext-diff --no-textconv --text --stat "$old" "$new" -- "${files[@]}"
+  git --no-pager -c diff.external= diff --no-ext-diff --no-textconv --text "$old" "$new" -- "${files[@]}"
 else
   echo "Nothing pinned yet. Full scanner files at ${new:0:12} (links followed):"
   for f in "${files[@]}"; do
     git cat-file -e "$new:$f" 2>/dev/null || continue
     [[ "$(git ls-tree "$new" -- "$f" | awk '{print $1}')" == "120000" ]] && { echo "--- $f -> $(git cat-file -p "$new:$f")"; continue; }
     echo "--- $f"
-    git --no-pager show "$new:$f"
+    git cat-file -p "$new:$f" # raw blob, no filters
   done
 fi
 
