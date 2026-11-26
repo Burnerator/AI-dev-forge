@@ -12,6 +12,7 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Gates for adopting projects: `pre-push` hook, `scripts/check.sh`, `scripts/check_secrets.sh`, `forge-gates` CI workflow and a PR template with AI disclosure.
 - Team AI usage policy, per-client guides, and an enforcement guide with its limits.
 - Installer (`scripts/install.sh`) with `--dry-run` and `--force`, and its tests.
+- Contribution docs: `CONTRIBUTING.md` (setup, checks, adding skills, guides and MCP servers, review rules), `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CODEOWNERS` and issue templates.
 - Gate integration tests (`tests/test_gates.sh`) against throwaway repositories and a local bare remote.
 
 ### Security

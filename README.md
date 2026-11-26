@@ -74,7 +74,7 @@ tests/                    Installer and gate integration tests (run in CI)
 
 ## Contributing
 
-Contributions are welcome, especially new skills and setup guides for more clients. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are welcome, especially new skills and setup guides for more clients. Start with [CONTRIBUTING.md](CONTRIBUTING.md): how to set up your clone, run the checks, and add a skill, a client guide or an MCP server. Please follow the [Code of Conduct](CODE_OF_CONDUCT.md), and report security problems privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

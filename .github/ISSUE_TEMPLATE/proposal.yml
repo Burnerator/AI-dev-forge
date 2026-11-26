@@ -1,0 +1,25 @@
+name: Proposal
+description: A new skill, client guide, MCP server, or a change to the rules or gates.
+labels: [proposal]
+body:
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options: [Skill, Client guide, MCP server, Rules or policy, Gates, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What does your team need that the forge does not cover?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you would add or change, and which clients it affects.
+    validations:
+      required: true
