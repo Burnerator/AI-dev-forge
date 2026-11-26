@@ -16,6 +16,9 @@
 #    worktree (no .env, no uncommitted changes) and runs its own scripts/check.sh,
 #    so what is tested is what is published. Intermediate commits of a push
 #    are not run individually; CI tests every pushed tip too.
+#    That check.sh is code from the pushed commit, run with your privileges and
+#    environment, exactly like running the project's tests yourself: only push
+#    commits whose code you have read.
 #
 # Trust boundary: this is a guard against mistakes by the person pushing, not
 # against that person (git push --no-verify skips it). CI and branch protection
@@ -23,6 +26,8 @@
 #
 # Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
+# Scan and check the objects git actually transfers, never replacement objects.
+export GIT_NO_REPLACE_OBJECTS=1
 repo_root="$(git rev-parse --show-toplevel)"
 zero="0000000000000000000000000000000000000000"
 

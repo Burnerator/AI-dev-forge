@@ -31,6 +31,11 @@ jobs:
           tar -xzf "$f" gitleaks && sudo mv gitleaks /usr/local/bin/
       - name: Secrets gate
         run: ./scripts/check_secrets.sh
+      - name: Secrets gate on the pushed tag (message and tagger identity)
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --no-tags origin "+$GITHUB_REF:$GITHUB_REF" # the tag object itself, not only its commit
+          ./scripts/check_secrets.sh "$GITHUB_REF"
 
   checks:
     strategy:

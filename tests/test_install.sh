@@ -86,6 +86,17 @@ echo "ours" > "$p/.agents/skills/code-review/helper.sh"; echo "old" > "$p/.agent
 check "project-only file kept" test "$(cat "$p/.agents/skills/code-review/helper.sh")" = ours
 check "forge file updated" grep -q '^name: code-review' "$p/.agents/skills/code-review/SKILL.md"
 
+echo "a symlink in place of a skill directory"
+p="$tmp/skill-link"; mkdir -p "$p/.agents/skills" "$tmp/elsewhere"
+echo "theirs" > "$tmp/elsewhere/SKILL.md"
+ln -s "$tmp/elsewhere" "$p/.agents/skills/code-review"
+"$install" "$p" >/dev/null
+check "without --force the link is left alone" test -L "$p/.agents/skills/code-review"
+"$install" --force "$p" >/dev/null
+check "--force replaces the link with the real skill" test ! -L "$p/.agents/skills/code-review"
+check "the replaced skill is the forge's" grep -q '^name: code-review' "$p/.agents/skills/code-review/SKILL.md"
+check "the link target is untouched" test "$(cat "$tmp/elsewhere/SKILL.md")" = theirs
+
 echo ".claude/skills link is verified"
 p="$tmp/stale-link"; mkdir -p "$p/.claude"; ln -s /nonexistent/skills "$p/.claude/skills"
 out="$("$install" "$p")"

@@ -104,7 +104,7 @@ for skill_dir in "$FORGE_DIR"/skills/*/; do
   [[ -f "$skill_dir/SKILL.md" ]] || continue
   name="$(basename "$skill_dir")"
   dest="$TARGET/.agents/skills/$name"
-  safe_parents "$dest/SKILL.md"
+  safe_parents "$dest" # ancestors only; a link at $dest itself is handled below
   if [[ ( -e "$dest" || -L "$dest" ) && $FORCE -eq 0 ]]; then
     echo "  skip    .agents/skills/$name (exists; use --force to overwrite)"
     continue

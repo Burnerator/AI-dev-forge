@@ -21,6 +21,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
 
+# Read the real objects: replacement refs (git replace) would otherwise let the
+# scan see substitute content while a push transfers the original commits.
+export GIT_NO_REPLACE_OBJECTS=1
+
 # A shallow clone stops at its boundary: older commits would go unchecked.
 if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
   echo "ERROR: shallow clone; the full history cannot be checked." >&2

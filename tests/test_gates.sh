@@ -6,6 +6,8 @@ set -euo pipefail
 # Each case sets bootstrap mode itself; never inherit it (e.g. when this suite
 # runs inside a FORGE_BOOTSTRAP=1 push of the forge).
 unset FORGE_BOOTSTRAP
+# The hook exports this; the replacement fixture needs git's default behaviour.
+unset GIT_NO_REPLACE_OBJECTS
 forge="$(cd "$(dirname "$0")/.." && pwd -P)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -121,11 +123,14 @@ git -C "$p" add blob.dat; git -C "$p" commit -qm "add binary"
 rejects "finds a secret inside a file git treats as binary" "$LEAK" secrets "$p"
 
 p="$tmp/private"; new_project "$p"
-printf 'token = "%s"\n' "$(fake_token)" > "$p/secret path name.txt"
+token="$(fake_token)"
+printf 'token = "%s"\n' "$token" > "$p/secret path name.txt"
 git -C "$p" add -A
 git -C "$p" -c user.name="Private Person" -c user.email=private.person@example.com commit -qm "add config"
-out="$(secrets "$p" 2>&1 || true)"
+status=0; out="$(secrets "$p" 2>&1)" || status=$?
+check "the gate rejects the commit" test "$status" -ne 0
 check "fixture: the scan did report the finding" grep -qE "$LEAK" <<<"$out"
+check "never prints the token" test -z "$(grep -F "${token:4}" <<<"$out")"
 check "never prints the author's email" test -z "$(grep -i 'private.person@example.com' <<<"$out")"
 check "never prints the author's name" test -z "$(grep -i 'Private Person' <<<"$out")"
 check "never prints the file path" test -z "$(grep -i 'secret path name' <<<"$out")"
@@ -149,6 +154,23 @@ git -C "$p" tag -a outer -m "outer" inner
 git -C "$p" update-ref -d refs/tags/inner # only the outer tag has a ref
 check "fixture: outer tag points to a tag object" test "$(git -C "$p" cat-file -t "$(git -C "$p" cat-file tag outer | sed -n 's/^object //p')")" = tag
 rejects "follows a tag that points to a tag" "non-noreply email" secrets "$p"
+
+p="$tmp/replace"; new_project "$p"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+leaky="$(git -C "$p" rev-parse HEAD)"
+git -C "$p" rm -q config.txt; git -C "$p" commit -qm "clean"
+clean_tree="$(git -C "$p" rev-parse 'HEAD^{tree}')"
+fake="$(git -C "$p" commit-tree "$clean_tree" -p "$leaky^" -m "add config")"
+git -C "$p" replace "$leaky" "$fake" # local history now shows no secret
+check "fixture: with replacements, git log no longer shows the secret" test -z "$(git -C "$p" log -p --all | grep ghp_)"
+rejects "ignores replacement objects and scans the real history" "$LEAK" secrets "$p"
+
+p="$tmp/tag-explicit"; new_project "$p"
+git -C "$p" -c user.email=someone@example.com tag -a v9 -m "release"
+tagobj="$(git -C "$p" rev-parse v9)"
+git -C "$p" update-ref -d refs/tags/v9 # as in a CI checkout: only what is passed explicitly
+rejects "rejects a tag passed explicitly (CI tag push) with a personal tagger" "non-noreply email" secrets "$p" "$tagobj"
 
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
