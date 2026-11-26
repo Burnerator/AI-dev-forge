@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-shell_files=(scripts/install.sh template/scripts/check.sh template/scripts/check_secrets.sh
+shell_files=(scripts/install.sh template/scripts/check.sh template/scripts/check_secrets.sh template/scripts/trust-scanner.sh
   template/.githooks/pre-push tests/test_install.sh tests/test_gates.sh scripts/check.sh)
 
 echo "==> bash -n"

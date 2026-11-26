@@ -22,7 +22,7 @@ You need `git`, `bash`, [`shellcheck`](https://www.shellcheck.net) and [`gitleak
 git clone https://github.com/Burnerator/AI-dev-forge.git   # or your fork
 cd AI-dev-forge
 git config core.hooksPath .githooks                         # enable the pre-push gates
-git config forge.trustedRef refs/remotes/origin/main        # scanner the hook trusts
+git fetch origin && scripts/trust-scanner.sh refs/remotes/origin/main  # pin the scanner, after reading it
 git config user.email "<id>+<login>@users.noreply.github.com"  # never a personal email
 ```
 

@@ -106,14 +106,19 @@ copy_file() {
 # Preflight: check every destination before writing anything, so a refusal
 # (for example a symlinked directory) never leaves a half-installed project.
 rules=(AGENTS.md CLAUDE.md .mcp.json .vscode/mcp.json
-  .githooks/pre-push scripts/check.sh scripts/check_secrets.sh
+  .githooks/pre-push scripts/check.sh scripts/check_secrets.sh scripts/trust-scanner.sh
   .github/workflows/forge-gates.yml .github/pull_request_template.md)
 for rel in "${rules[@]}"; do file_slot "$TARGET/$rel"; done
 for skill_dir in "$FORGE_DIR"/skills/*/; do
   [[ -f "$skill_dir/SKILL.md" ]] || continue
   name="$(basename "$skill_dir")"
   safe_parents "$TARGET/.agents/skills/$name"
-  if [[ ! -L "$TARGET/.agents/skills/$name" ]]; then
+  root="$TARGET/.agents/skills/$name"
+  if [[ -e "$root" && ! -d "$root" && ! -L "$root" ]]; then
+    echo "ERROR: .agents/skills/$name exists and is not a directory; nothing was installed." >&2
+    exit 1
+  fi
+  if [[ ! -L "$root" ]]; then
     while IFS= read -r -d '' src; do
       file_slot "$TARGET/.agents/skills/$name/${src#"$skill_dir"}"
     done < <(find "$skill_dir" -type f -print0)
@@ -183,8 +188,8 @@ Done. Next steps:
   1. Edit AGENTS.md: fill in the PROJECT sections (build/test commands, style).
   2. Put your real lint + test commands in scripts/check.sh (it fails until you do).
   3. Enable the hook in each clone: git config core.hooksPath .githooks
-     and trust your reviewed default branch's scanner:
-     git config forge.trustedRef refs/remotes/origin/main
+     and pin the scanner it trusts (after reading it):
+     scripts/trust-scanner.sh refs/remotes/origin/main
      (needs gitleaks: https://github.com/gitleaks/gitleaks#installing)
   4. Set GITHUB_PAT in your environment for the GitHub MCP server.
   5. Commit the new files, then protect main and require the forge-gates

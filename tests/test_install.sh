@@ -120,6 +120,11 @@ tree_before="$(snapshot "$p")"
 refuses "rejects a directory where a file is expected" "$install" --force "$p"
 check "nothing changed (directory slot)" test "$(snapshot "$p")" = "$tree_before"
 
+p="$tmp/skill-file"; mkdir -p "$p/.agents/skills"; echo "not a dir" > "$p/.agents/skills/code-review"; echo "mine" > "$p/AGENTS.md"
+tree_before="$(snapshot "$p")"
+refuses "rejects a file in place of a skill directory" "$install" --force "$p"
+check "nothing changed (skill file)" test "$(snapshot "$p")" = "$tree_before"
+
 echo "refusals"
 refuses "rejects missing directory" "$install" "$tmp/nope"
 refuses "rejects installing into the forge" "$install" "$forge"

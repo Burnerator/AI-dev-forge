@@ -59,7 +59,7 @@ Never:
 
 ### Gates
 
-Before proposing a push, run `./scripts/check.sh` (lint + tests) and `./scripts/check_secrets.sh` (no `.env` in history, no leaked keys, noreply commit emails, full clone). The `pre-push` hook and CI run the same scripts; enable the hook once per clone with `git config core.hooksPath .githooks` and `git config forge.trustedRef refs/remotes/origin/main`.
+Before proposing a push, run `./scripts/check.sh` (lint + tests) and `./scripts/check_secrets.sh` (no `.env` in history, no leaked keys, noreply commit emails, full clone). The `pre-push` hook and CI run the same scripts; enable the hook once per clone with `git config core.hooksPath .githooks` and pin its scanner with `scripts/trust-scanner.sh refs/remotes/origin/main`. Never change `forge.trustedCommit` yourself: re-pinning is the developer's decision, after reading the diff.
 
 ### Reviews
 

@@ -18,12 +18,13 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 ### Security
 
 - Secrets gate scans merge diffs (`git log -m`), reads paths NUL-delimited, scans commits passed by the hook even when no ref points to them, fails closed if gitleaks errors or scans nothing, and rejects shallow clones.
-- `pre-push` runs the secrets gate only from an explicitly trusted local ref (`forge.trustedRef`), never from the working copy, the pushed commits or the push destination; it fails closed when unset. Bootstrap needs an explicit `FORGE_BOOTSTRAP=1`.
+- `pre-push` runs the secrets gate only from an explicitly trusted scanner, never from the working copy, the pushed commits or the push destination; it fails closed when none is set. Bootstrap needs an explicit `FORGE_BOOTSTRAP=1`.
 - Secrets gate scans the contents of binary files (`--text`), distinguishes findings from operational errors, and prints only a count and commit IDs, never raw findings.
 - Installer refuses targets inside the forge checkout, and verifies (or with `--force` repairs) the `.claude/skills` link.
 - The secrets gate checks annotated tags, nested ones included (messages and tagger emails), and ignores inline `gitleaks:allow` comments.
 - `install.sh --force` overwrites the forge's skill files and keeps project-only files, and replaces a symlink in place of a skill directory.
 - Secrets gate scans commit messages; `--only` limits a scan to given revisions, used by CI so required checks depend only on the commit under test; CI checkouts no longer persist the job token.
+- The hook trusts a pinned scanner commit (`forge.trustedCommit`, set with `scripts/trust-scanner.sh`, which shows the diff) instead of a ref that moves on fetch; installer preflight rejects a file in place of a skill directory.
 - Secrets gate scans root commits regardless of `log.showRoot` and reads the tagger only from the tag header; temporary checkouts run with hooks disabled; Codex and Copilot guides state their verification status.
 - Secrets gate ignores `GITLEAKS_CONFIG`/`GITLEAKS_CONFIG_TOML` overrides; the hook stops if it cannot create a clean checkout; installer preflight also rejects files where directories are needed and vice versa.
 - CI on a tag push verifies the exact tag object from the push event (`check_secrets.sh --tag`), with no token exposed; the installer preflights every destination before writing; the `open-pull-request` skill opens drafts by default.

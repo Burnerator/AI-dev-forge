@@ -5,13 +5,14 @@
 #    (even a commit that no local ref points to). The scanner is never taken
 #    from the working copy, the pushed commits or the push destination. It is
 #    the committed scripts/check_secrets.sh (and .gitleaks.toml/.gitleaksignore)
-#    of the revision you trust explicitly, once per clone:
-#        git config forge.trustedRef refs/remotes/origin/main
-#    That ref holds reviewed code you fetched yourself; keep it fetched.
-#    Unset or unresolvable: the push is refused. If the trusted revision has no
-#    scanner yet (the push that introduces the forge), the push is refused
-#    unless run as FORGE_BOOTSTRAP=1 git push ..., which scans with each pushed
-#    tip's own scanner.
+#    of a commit you pinned after reviewing it, once per clone and again
+#    whenever you accept a new scanner version:
+#        scripts/trust-scanner.sh refs/remotes/origin/main
+#    (it shows the scanner diff and stores the commit ID in forge.trustedCommit).
+#    A pin does not move on fetch. Unset: the push is refused. If nothing is
+#    pinned yet or the pinned commit has no scanner (the push that introduces
+#    the forge), the push is refused unless run as FORGE_BOOTSTRAP=1 git push ...,
+#    which scans with each pushed tip's own scanner.
 # 2) Quality gate: each pushed ref tip is checked out in a clean temporary
 #    worktree (no .env, no uncommitted changes) and runs its own scripts/check.sh,
 #    so what is tested is what is published. Intermediate commits of a push
@@ -73,34 +74,34 @@ done
 
 [[ ${#shas[@]} -eq 0 ]] && exit 0
 
-# Resolve the trusted scanner: only from an explicitly configured local ref.
+# Resolve the trusted scanner: a pinned commit, never a ref that moves on fetch.
 bootstrap=0
-trusted=""
-trusted_ref="$(git -C "$repo_root" config --get forge.trustedRef || true)"
-if [[ -z "$trusted_ref" ]]; then
-  echo "pre-push: no trusted scanner configured; push aborted. Once per clone, run:" >&2
-  echo "  git config forge.trustedRef refs/remotes/origin/main   # your reviewed default branch" >&2
+trusted="$(git -C "$repo_root" config --get forge.trustedCommit || true)"
+if [[ -z "$trusted" ]]; then
+  bootstrap=1 # nothing pinned yet
+elif [[ ! "$trusted" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+  echo "pre-push: forge.trustedCommit must be a full commit ID, not '$trusted'; push aborted." >&2
+  echo "  Pin a reviewed commit with: scripts/trust-scanner.sh <commit>" >&2
   exit 1
-fi
-if trusted="$(git -C "$repo_root" rev-parse --verify --quiet "${trusted_ref}^{commit}")" \
-  && git -C "$repo_root" cat-file -e "$trusted:scripts/check_secrets.sh" 2>/dev/null; then
-  :
-else
-  trusted=""
-  bootstrap=1 # the trusted ref does not exist yet, or predates the forge
+elif ! git -C "$repo_root" cat-file -e "${trusted}^{commit}" 2>/dev/null; then
+  echo "pre-push: pinned scanner commit ${trusted:0:12} is not in this clone (fetch it); push aborted." >&2
+  exit 1
+elif ! git -C "$repo_root" cat-file -e "$trusted:scripts/check_secrets.sh" 2>/dev/null; then
+  bootstrap=1 # the pinned commit predates the forge
 fi
 
 if [[ $bootstrap -eq 1 ]]; then
   if [[ "${FORGE_BOOTSTRAP:-}" != "1" ]]; then
-    echo "pre-push: $trusted_ref has no reviewed scanner yet, so there is nothing trusted" >&2
-    echo "  to scan with. If this is the push that introduces the forge, rerun with" >&2
-    echo "  FORGE_BOOTSTRAP=1 git push ...   (each pushed tip is then scanned with its own scanner)." >&2
+    echo "pre-push: no trusted scanner pinned (or the pinned commit has none), so there is" >&2
+    echo "  nothing reviewed to scan with. Pin one: scripts/trust-scanner.sh refs/remotes/origin/main" >&2
+    echo "  Only for the push that introduces the forge: FORGE_BOOTSTRAP=1 git push ..." >&2
+    echo "  (each pushed tip is then scanned with its own scanner)." >&2
     exit 1
   fi
   echo "pre-push: FORGE_BOOTSTRAP=1: using each pushed tip's own scanner."
 else
-  echo "pre-push: secrets gate (scanner from $trusted_ref @ ${trusted:0:7}; all refs + pushed commits)..."
-  wt="$(checkout "$trusted")" || checkout_failed "$trusted_ref"
+  echo "pre-push: secrets gate (scanner from pinned commit ${trusted:0:12}; all refs + pushed commits)..."
+  wt="$(checkout "$trusted")" || checkout_failed "pinned commit ${trusted:0:12}"
   worktrees+=("$wt")
   if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
     echo "pre-push: secrets gate failed, push aborted." >&2

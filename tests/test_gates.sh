@@ -62,13 +62,19 @@ new_project() {
   "$forge/scripts/install.sh" "$p" >/dev/null
   printf '#!/usr/bin/env bash\necho "checks ok"\n' > "$p/scripts/check.sh"
   git -C "$p" config core.hooksPath .githooks
-  git -C "$p" config forge.trustedRef refs/remotes/origin/main
   git -C "$p" add -A
   git -C "$p" commit -qm "chore: install forge"
   # Explicit default branch: runners without init.defaultBranch would point the
   # bare remote's HEAD at a non-existent master.
   git init -q --bare -b main "$p.remote.git"
   git -C "$p" remote add origin "$p.remote.git"
+}
+
+# bootstrap_push <dir> <branch>: first push of the forge, then pin its scanner,
+# as a developer would after reading it.
+bootstrap_push() {
+  FORGE_BOOTSTRAP=1 git -C "$1" push -q origin "$2"
+  git -C "$1" config forge.trustedCommit "$(git -C "$1" rev-parse "$2")"
 }
 
 secrets() { (cd "$1" && ./scripts/check_secrets.sh "${@:2}"); }
@@ -234,7 +240,7 @@ check "a header-like line in a tag message is not taken as the tagger" secrets "
 
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
-rejects "refuses a first push without explicit bootstrap" "no reviewed scanner yet" git -C "$p" push origin main
+rejects "refuses a first push without explicit bootstrap" "no trusted scanner pinned" git -C "$p" push origin main
 check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
 check "allows a clean first push with FORGE_BOOTSTRAP=1" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
 check "the push reached the remote" git -C "$p.remote.git" rev-parse --verify -q refs/heads/main
@@ -253,7 +259,7 @@ rejects "blocks a first push that contains a secret" "secrets gate failed" env F
 check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
 
 p="$tmp/push-orphan"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 git -C "$p" switch -q --detach
 echo "X=1" > "$p/.env"; git -C "$p" add -f .env; git -C "$p" commit -qm "env on detached HEAD"
 orphan="$(git -C "$p" rev-parse HEAD)"
@@ -262,7 +268,7 @@ rejects "blocks pushing by SHA a commit that no ref points to" "secrets gate fai
 check "the unreferenced commit did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/sneaky
 
 p="$tmp/push-wc-scanner"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh" # weakened, uncommitted
 printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
@@ -270,7 +276,7 @@ rejects "ignores a weakened scanner in the working copy" "secrets gate failed" g
 check "the secret did not reach the remote" test "$(git -C "$p.remote.git" rev-parse main)" != "$(git -C "$p" rev-parse main)"
 
 p="$tmp/push-committed-scanner"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 git -C "$p" switch -qc feat/weaken
 printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh"
 printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
@@ -279,34 +285,33 @@ rejects "uses the default branch's scanner, not one committed on the branch" "se
 check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/weaken
 
 p="$tmp/push-unset"; new_project "$p"
-git -C "$p" config --unset forge.trustedRef
-rejects "refuses to push when no trusted scanner is configured" "no trusted scanner configured" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+git -C "$p" config forge.trustedCommit refs/remotes/origin/main
+rejects "refuses a pin that is a ref name, not a commit ID" "must be a full commit ID" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
 check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
 
 p="$tmp/push-trunk"; new_project "$p"
 git -C "$p" branch -m main trunk
-git -C "$p" config forge.trustedRef refs/remotes/origin/trunk
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin trunk
+bootstrap_push "$p" trunk
 git -C "$p" switch -qc feat/x
 printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh"
 printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add -A; git -C "$p" commit -qm "weaken scanner and add config"
-rejects_all "uses the configured trusted ref (trunk), and its scanner finds the secret" "scanner from refs/remotes/origin/trunk @ $(git -C "$p" rev-parse --short=7 trunk)" "$LEAK" git -C "$p" push origin feat/x
+rejects_all "uses the pinned scanner (trunk), and it finds the secret" "scanner from pinned commit $(git -C "$p" rev-parse --short=12 trunk)" "$LEAK" git -C "$p" push origin feat/x
 check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/x
 
 p="$tmp/push-ignorefile"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 git -C "$p" switch -qc feat/ignore
 printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
 echo "$(git -C "$p" rev-parse HEAD):config.txt:github-pat:1" > "$p/.gitleaksignore"
 git -C "$p" add .gitleaksignore; git -C "$p" commit -qm "ignore it"
 check "fixture: the branch's ignore file would silence the finding" secrets "$p"
-rejects_all "a .gitleaksignore committed on the branch does not silence the trusted scan" "scanner from refs/remotes/origin/main" "$LEAK" git -C "$p" push origin feat/ignore
+rejects_all "a .gitleaksignore committed on the branch does not silence the trusted scan" "scanner from pinned commit" "$LEAK" git -C "$p" push origin feat/ignore
 check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/ignore
 
 p="$tmp/push-dest"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 # A second, non-empty destination whose default branch carries a hostile scanner.
 evil="$tmp/push-dest.evil"; marker="$tmp/push-dest.ran"
 git clone -q "$p.remote.git" "$evil"
@@ -321,11 +326,11 @@ git -C "$p" fetch -q "$evil.git" main
 git -C "$p" reset -q --hard FETCH_HEAD
 printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
 git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
-rejects_all "never runs code from the push destination" "scanner from refs/remotes/origin/main" "$LEAK" git -C "$p" push origin main
+rejects_all "never runs code from the push destination" "scanner from pinned commit" "$LEAK" git -C "$p" push origin main
 check "the destination's scanner never ran" test ! -e "$marker"
 
 p="$tmp/push-nocheckout"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 echo z > "$p/z"; git -C "$p" add z; git -C "$p" commit -qm "more"
 status=0; out="$(TMPDIR="$tmp/does-not-exist" git -C "$p" push origin main 2>&1)" || status=$?
 check "stops when it cannot create a clean checkout" test "$status" -ne 0
@@ -341,16 +346,54 @@ check "push with a post-checkout hook in the project" env FORGE_BOOTSTRAP=1 git 
 check "the project's post-checkout hook never ran during the gates" test ! -e "$marker"
 
 p="$tmp/push-msg"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
 rejects "blocks a push whose only secret is in a commit message" "commit messages contain" git -C "$p" push origin main
 check "the commit did not reach the remote" test "$(git -C "$p.remote.git" rev-parse main)" != "$(git -C "$p" rev-parse main)"
 
 p="$tmp/push-tag"; new_project "$p"
-FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+bootstrap_push "$p" main
 git -C "$p" -c user.email=someone@example.com tag -a v1 -m "release"
 rejects "blocks pushing an annotated tag with a personal tagger email" "non-noreply email" git -C "$p" push origin v1
 check "the tag did not reach the remote" no_remote_ref "$p.remote.git" refs/tags/v1
+
+p="$tmp/push-pin"; new_project "$p"
+bootstrap_push "$p" main
+pinned="$(git -C "$p" rev-parse main)"
+other="$tmp/push-pin.other"; git clone -q "$p.remote.git" "$other"
+git -C "$other" config user.email "1+o@users.noreply.github.com"; git -C "$other" config user.name o
+printf '#!/usr/bin/env bash\nexit 0\n' > "$other/scripts/check_secrets.sh"
+git -C "$other" commit -qam "unreviewed scanner on main"
+git -C "$other" push -q --no-verify origin main
+git -C "$p" fetch -q origin # origin/main now carries the unreviewed scanner
+check "fixture: origin/main moved past the pin" test "$(git -C "$p" rev-parse origin/main)" != "$pinned"
+git -C "$p" switch -qc feat/z
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects_all "a fetch does not move the trusted scanner: the pin still runs" "scanner from pinned commit ${pinned:0:12}" "$LEAK" git -C "$p" push origin feat/z
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/z
+
+echo "trust-scanner.sh"
+p="$tmp/trust"; new_project "$p"
+first="$(git -C "$p" rev-parse HEAD)"
+trust() { (cd "$1" && ./scripts/trust-scanner.sh "${@:2}"); }
+trust_no() { (cd "$1" && echo n | ./scripts/trust-scanner.sh "${@:2}"); }
+rejects "refuses something that is not a commit" "not a commit" trust "$p" --yes nope
+git -C "$p" commit -q --allow-empty -m "second"
+printf 'x\n' > "$p/README"; git -C "$p" add README; git -C "$p" commit -qm third
+check "pins a commit with --yes" trust "$p" --yes "$first"
+check "stores the full commit ID" test "$(git -C "$p" config forge.trustedCommit)" = "$first"
+printf '\n# reviewed change\n' >> "$p/scripts/check_secrets.sh"; git -C "$p" commit -qam "scanner change"
+out="$(trust "$p" --yes HEAD)"
+check "shows the scanner diff before re-pinning" grep -q '+# reviewed change' <<<"$out"
+check "re-pins to the new commit" test "$(git -C "$p" config forge.trustedCommit)" = "$(git -C "$p" rev-parse HEAD)"
+rejects "asks before re-pinning and keeps the pin on no" "Not changed" trust_no "$p" "$first"
+check "pin unchanged after answering no" test "$(git -C "$p" config forge.trustedCommit)" = "$(git -C "$p" rev-parse HEAD)"
+q="$tmp/trust-noscanner"; mkdir -p "$q"; git -C "$q" init -q -b main
+git -C "$q" config user.name t; git -C "$q" config user.email "1+t@users.noreply.github.com"
+git -C "$q" commit -q --allow-empty -m empty
+"$forge/scripts/install.sh" "$q" >/dev/null
+rejects "refuses a commit without a scanner" "has no scripts/check_secrets.sh" trust "$q" --yes HEAD
 
 if [[ $fails -ne 0 ]]; then
   echo "$fails test(s) failed" >&2
