@@ -62,7 +62,10 @@ checkout_failed() {
 # Read what is being pushed before running any gate.
 refs=()
 shas=()
-while read -r local_ref local_sha _remote_ref _remote_sha; do
+input_lines=() # kept verbatim, to hand to chained hooks
+while IFS= read -r line; do
+  input_lines+=("$line")
+  read -r local_ref local_sha _remote_ref _remote_sha <<<"$line"
   [[ "$local_sha" == "$zero" ]] && continue # branch deletion: nothing to test
   if ! git -C "$repo_root" cat-file -e "${local_sha}^{commit}" 2>/dev/null; then
     echo "pre-push: $local_ref @ $local_sha is not a commit; refusing to push it unchecked." >&2
@@ -72,7 +75,42 @@ while read -r local_ref local_sha _remote_ref _remote_sha; do
   shas+=("$local_sha")
 done
 
-[[ ${#shas[@]} -eq 0 ]] && exit 0
+# chain_existing_hooks: core.hooksPath replaces the hooks directory, so run what
+# would otherwise have run: the project's previous pre-push hook in
+# $GIT_COMMON_DIR/hooks (for example Git LFS or another tool's hook) or, if
+# there is none and the repository uses Git LFS, `git lfs pre-push`. Without
+# this, LFS objects would not be uploaded and clones would get bare pointers.
+chain_existing_hooks() {
+  local legacy uses_lfs=0
+  legacy="$(git -C "$repo_root" rev-parse --git-common-dir)/hooks/pre-push"
+  [[ "$legacy" != /* ]] && legacy="$repo_root/$legacy"
+  if git -C "$repo_root" config --get-regexp '^filter\.lfs\.' >/dev/null 2>&1 \
+    || git -C "$repo_root" grep -q 'filter=lfs' HEAD -- .gitattributes '*/.gitattributes' 2>/dev/null; then
+    uses_lfs=1
+  fi
+  if [[ -x "$legacy" ]]; then
+    echo "pre-push: running the previous pre-push hook ($legacy)..."
+    printf '%s\n' ${input_lines[@]+"${input_lines[@]}"} | "$legacy" "$@" || {
+      echo "pre-push: the previous pre-push hook failed, push aborted." >&2
+      exit 1
+    }
+  elif [[ $uses_lfs -eq 1 ]]; then
+    if ! command -v git-lfs >/dev/null 2>&1; then
+      echo "pre-push: this repository uses Git LFS but git-lfs is not installed; push aborted." >&2
+      exit 1
+    fi
+    echo "pre-push: running git lfs pre-push..."
+    printf '%s\n' ${input_lines[@]+"${input_lines[@]}"} | git lfs pre-push "$@" || {
+      echo "pre-push: git lfs pre-push failed, push aborted." >&2
+      exit 1
+    }
+  fi
+}
+
+if [[ ${#shas[@]} -eq 0 ]]; then
+  chain_existing_hooks "$@"
+  exit 0
+fi
 
 # Resolve the trusted scanner: a pinned commit, never a ref that moves on fetch.
 bootstrap=0
@@ -126,3 +164,6 @@ for i in "${!shas[@]}"; do
     exit 1
   fi
 done
+
+# All gates passed: run the hooks core.hooksPath would otherwise have bypassed.
+chain_existing_hooks "$@"

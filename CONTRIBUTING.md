@@ -22,7 +22,7 @@ You need `git`, `bash`, [`shellcheck`](https://www.shellcheck.net) and [`gitleak
 git clone https://github.com/Burnerator/AI-dev-forge.git   # or your fork
 cd AI-dev-forge
 git config core.hooksPath .githooks                         # enable the pre-push gates
-git fetch origin && scripts/trust-scanner.sh refs/remotes/origin/main  # pin the scanner, after reading it
+git fetch origin && scripts/trust-scanner.sh refs/remotes/origin/main  # pin the reviewed scanner, after reading it
 git config user.email "<id>+<login>@users.noreply.github.com"  # never a personal email
 ```
 
@@ -72,7 +72,7 @@ AI assistance is welcome; this project is about it. The rules are those of [poli
 
 ## Review and merge
 
-- `main` is protected: changes land only through pull requests, with CI green (`secrets`, `checks (ubuntu-latest)`, `checks (macos-latest)`), conversations resolved, and **one approving review from a maintainer other than the last person who pushed**. Code Owners (see [.github/CODEOWNERS](.github/CODEOWNERS)) must approve changes to the gates. Nobody, admins included, can bypass this.
+- `main` is protected (maintainers configured these settings and verified them through the GitHub API on 2026-11-26; if you see otherwise, open an issue): changes land only through pull requests, with CI green (`secrets`, `checks (ubuntu-latest)`, `checks (macos-latest)`), conversations resolved, and **one approving review from a maintainer other than the last person who pushed**. Code Owners (see [.github/CODEOWNERS](.github/CODEOWNERS)) must approve changes to the gates. Nobody, admins included, can bypass this.
 - Maintainers may also run an independent AI review on a pull request and post its summary there. It complements human review; it never replaces it.
 - Pull requests are squash-merged with a Conventional Commit title.
 

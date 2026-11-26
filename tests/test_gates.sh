@@ -105,6 +105,14 @@ mkdir -p "$p/dír con espacio"; echo "X=1" > "$p/dír con espacio/.env"
 git -C "$p" add -f "dír con espacio/.env"; git -C "$p" commit -qm env
 rejects "finds .env in a path git would quote" "$ENV" secrets "$p"
 
+p="$tmp/envrc"; new_project "$p"
+echo "export X=1" > "$p/.envrc"; git -C "$p" add -f .envrc; git -C "$p" commit -qm envrc
+rejects "finds .envrc at the root" "$ENV" secrets "$p"
+p="$tmp/envnested"; new_project "$p"
+mkdir -p "$p/config/deep"; echo "X=1" > "$p/config/deep/.env.production"; echo "export X=1" > "$p/config/.envrc"
+git -C "$p" add -f config; git -C "$p" commit -qm nested
+rejects "finds nested .env.production and .envrc" "2 occurrence" secrets "$p"
+
 p="$tmp/example"; new_project "$p"
 echo "X=" > "$p/.env.example"; git -C "$p" add .env.example; git -C "$p" commit -qm example
 check "allows .env.example" secrets "$p"
@@ -345,6 +353,29 @@ rm -f "$marker"
 check "push with a post-checkout hook in the project" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
 check "the project's post-checkout hook never ran during the gates" test ! -e "$marker"
 
+p="$tmp/push-legacy"; new_project "$p"
+marker="$tmp/legacy.ran"
+printf '#!/usr/bin/env bash\ncat > "%s"\n' "$marker" > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks/pre-push"
+check "push with a previous pre-push hook in .git/hooks" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "the previous hook ran after the gates" test -f "$marker"
+check "it received the same refs on stdin" grep -q "refs/heads/main $(git -C "$p" rev-parse main)" "$marker"
+p="$tmp/push-legacy-fail"; new_project "$p"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks/pre-push"
+rejects "a failing previous hook still blocks the push" "previous pre-push hook failed" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+
+lfsbin="$tmp/lfsbin"; mkdir -p "$lfsbin"; lfsmark="$tmp/lfs.ran"
+printf '#!/usr/bin/env bash\necho "$*" > "%s"; cat >> "%s"\n' "$lfsmark" "$lfsmark" > "$lfsbin/git-lfs"; chmod +x "$lfsbin/git-lfs"
+p="$tmp/push-lfs"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"; git -C "$p" add .gitattributes; git -C "$p" commit -qm "use lfs"
+check "push in an LFS repository" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "git lfs pre-push ran with the remote and the refs" grep -q "^pre-push origin" "$lfsmark"
+check "git lfs pre-push received the pushed refs" grep -q "refs/heads/main $(git -C "$p" rev-parse main)" "$lfsmark"
+p="$tmp/push-lfs-missing"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"; git -C "$p" add .gitattributes; git -C "$p" commit -qm "use lfs"
+nolfs="$tmp/nolfs"; mkdir -p "$nolfs"; for t in git bash env sh mktemp rm cat sed awk grep od tr head sort cut wc dirname basename find gitleaks printf; do w="$(command -v "$t" || true)"; [[ -n "$w" && "$w" == /* ]] && ln -sf "$w" "$nolfs/$t"; done
+rejects "refuses an LFS push when git-lfs is missing" "git-lfs is not installed" env PATH="$nolfs" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main
 echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
@@ -389,6 +420,17 @@ check "shows the scanner diff before re-pinning" grep -q '+# reviewed change' <<
 check "re-pins to the new commit" test "$(git -C "$p" config forge.trustedCommit)" = "$(git -C "$p" rev-parse HEAD)"
 rejects "asks before re-pinning and keeps the pin on no" "Not changed" trust_no "$p" "$first"
 check "pin unchanged after answering no" test "$(git -C "$p" config forge.trustedCommit)" = "$(git -C "$p" rev-parse HEAD)"
+p="$tmp/trust-link"; new_project "$p"
+mkdir -p "$p/vendor"; git -C "$p" mv scripts/check_secrets.sh vendor/check_secrets.sh
+ln -s ../vendor/check_secrets.sh "$p/scripts/check_secrets.sh"; git -C "$p" add -A; git -C "$p" commit -qm "scanner behind a link"
+trust "$p" --yes HEAD >/dev/null
+printf '\n# change only in the link target\n' >> "$p/vendor/check_secrets.sh"; git -C "$p" commit -qam "edit target"
+out="$(trust "$p" --yes HEAD)"
+check "a change confined to a symlink target shows in the pin diff" grep -q '+# change only in the link target' <<<"$out"
+git -C "$p" config --unset forge.trustedCommit
+out="$(trust "$p" --yes HEAD)"
+check "the first pin prints the full scanner, following links" grep -q '# change only in the link target' <<<"$out"
+
 q="$tmp/trust-noscanner"; mkdir -p "$q"; git -C "$q" init -q -b main
 git -C "$q" config user.name t; git -C "$q" config user.email "1+t@users.noreply.github.com"
 git -C "$q" commit -q --allow-empty -m empty

@@ -15,7 +15,8 @@
 #
 # What it checks:
 #   0) the clone is not shallow (otherwise older history would go unchecked)
-#   1) no .env file (only .env.example) in any scanned commit, merge commits included
+#   1) no .env, .env.* (except .env.example) or .envrc file, at any depth, in any
+#      scanned commit, merge and root commits included
 #   2) gitleaks finds no secrets in any scanned commit, including changes that only
 #      exist in a merge commit (conflict resolutions) and files git treats as binary.
 #      Only a count and commit IDs are printed, never gitleaks' raw findings.
@@ -100,7 +101,9 @@ env_count=0
 while IFS= read -r -d '' path; do
   [[ -z "$path" ]] && continue
   base="${path##*/}"
-  if [[ "$base" == ".env" || ( "$base" == .env.* && "$base" != ".env.example" ) ]]; then
+  # Policy: .env, .env.<anything> except .env.example, and .envrc (direnv), at
+  # any depth.
+  if [[ "$base" == ".env" || "$base" == ".envrc" || ( "$base" == .env.* && "$base" != ".env.example" ) ]]; then
     env_count=$((env_count + 1))
   fi
 done <"$paths_file"

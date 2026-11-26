@@ -45,9 +45,10 @@ Then, in the project:
 2. Run the preflight on the existing history: `./scripts/check_secrets.sh` (needs [gitleaks](https://github.com/gitleaks/gitleaks) and a full, non-shallow clone). In an existing project it may report `.env` files, keys or personal emails from the past. Either clean the history before publishing, or, if your team legitimately commits with corporate addresses in a private repository, adjust the identity pattern in `scripts/check_secrets.sh` through a reviewed pull request.
 3. Edit `AGENTS.md`: fill in the build and test commands and anything project-specific.
 4. Put your real lint and test commands in `scripts/check.sh`. It fails on purpose until you do.
-5. Enable the hook in each clone: `git config core.hooksPath .githooks`, then pin the scanner it trusts with `scripts/trust-scanner.sh refs/remotes/origin/main`. It shows you the scanner and stores that exact commit, which does not move when you fetch; run it again, after reading the diff, to accept a newer scanner.
-6. Commit the result so every collaborator gets it. The first push that brings the forge to an existing remote needs `FORGE_BOOTSTRAP=1 git push …`, because the remote has no reviewed scanner yet ([details](docs/enforcement.md)).
-7. Protect `main` and require the `forge-gates` checks: see [docs/enforcement.md](docs/enforcement.md).
+5. Enable the hook: `git config core.hooksPath .githooks`. If the project already has a `pre-push` hook (Git LFS, for example), the forge's hook runs it after its own gates, and runs `git lfs pre-push` for LFS repositories.
+6. Commit on a branch and push it with `FORGE_BOOTSTRAP=1 git push -u origin <branch>`: nothing reviewed exists to scan with yet, so this one push uses the branch's own scanner. Open the pull request and merge it once reviewed.
+7. After the merge, pin the reviewed scanner in each clone: `git fetch origin && scripts/trust-scanner.sh refs/remotes/origin/main`. It shows the scanner (links followed) and stores that exact commit, which does not move when you fetch. From now on pushes need no bootstrap; to accept a newer scanner later, run it again and read the diff.
+8. Protect `main` and require the `forge-gates` checks: see [docs/enforcement.md](docs/enforcement.md).
 
 ## Repository layout
 

@@ -3,7 +3,7 @@
 #
 # Usage: scripts/trust-scanner.sh [--yes] <commit-or-ref>
 #   Shows how the scanner (scripts/check_secrets.sh, .gitleaks.toml,
-#   .gitleaksignore) differs between the currently pinned commit and
+#   .gitleaksignore, and the files any of them link to) differs between the currently pinned commit and
 #   <commit-or-ref>, asks for confirmation (unless --yes), and stores the full
 #   commit ID in git config forge.trustedCommit. A pin never moves on fetch:
 #   run this again, after reading the diff, to accept a new scanner version.
@@ -13,7 +13,7 @@ export GIT_NO_REPLACE_OBJECTS=1
 yes=0
 if [[ "${1:-}" == "--yes" ]]; then yes=1; shift; fi
 if [[ $# -ne 1 ]]; then
-  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' >&2
+  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//' >&2
   exit 2
 fi
 
@@ -26,8 +26,52 @@ if ! git cat-file -e "$new:scripts/check_secrets.sh" 2>/dev/null; then
   exit 1
 fi
 
-files=(scripts/check_secrets.sh .gitleaks.toml .gitleaksignore)
+# resolve <commit> <path>: print <path> and, if it is a symlink inside the tree,
+# every path it leads to, so a change in the link target cannot hide behind an
+# unchanged link.
+normalize() {
+  local IFS=/ part out=()
+  # shellcheck disable=SC2086 # split on / is intended
+  set -- $1
+  for part in "$@"; do
+    case "$part" in
+      "" | .) ;;
+      ..) [[ ${#out[@]} -gt 0 ]] && unset 'out[${#out[@]}-1]' ;;
+      *) out+=("$part") ;;
+    esac
+  done
+  printf '%s\n' "${out[*]}"
+}
+resolve() {
+  local commit="$1" path="$2" hops=0 mode target
+  while [[ $hops -lt 10 ]]; do
+    printf '%s\n' "$path"
+    mode=$(git ls-tree "$commit" -- "$path" | awk '{print $1}')
+    [[ "$mode" == "120000" ]] || return 0
+    target=$(git cat-file -p "$commit:$path")
+    [[ "$target" == /* ]] && { echo "ERROR: $path links outside the repository." >&2; return 1; }
+    path=$(normalize "$(dirname "$path")/$target")
+    hops=$((hops + 1))
+  done
+  echo "ERROR: too many symlink hops from $2." >&2
+  return 1
+}
+
+base_files=(scripts/check_secrets.sh .gitleaks.toml .gitleaksignore)
 old=$(git config --get forge.trustedCommit || true)
+files=()
+for c in "$new" ${old:+"$old"}; do
+  git cat-file -e "${c}^{commit}" 2>/dev/null || continue
+  for f in "${base_files[@]}"; do
+    while IFS= read -r r; do files+=("$r"); done < <(resolve "$c" "$f")
+  done
+done
+# Unique, order kept.
+uniq_files=()
+for f in "${files[@]}"; do
+  [[ " ${uniq_files[*]-} " == *" $f "* ]] || uniq_files+=("$f")
+done
+files=("${uniq_files[@]}")
 if [[ -n "$old" ]] && git cat-file -e "${old}^{commit}" 2>/dev/null; then
   if [[ "$old" == "$new" ]]; then
     echo "forge.trustedCommit is already ${new:0:12}."
@@ -37,9 +81,13 @@ if [[ -n "$old" ]] && git cat-file -e "${old}^{commit}" 2>/dev/null; then
   git --no-pager diff --stat "$old" "$new" -- "${files[@]}"
   git --no-pager diff "$old" "$new" -- "${files[@]}"
 else
-  echo "Nothing pinned yet. Scanner files at ${new:0:12}:"
-  git --no-pager show --stat --format='%h %s' "$new" -- "${files[@]}" | tail -n +2
-  echo "Read them with: git show ${new:0:12}:scripts/check_secrets.sh"
+  echo "Nothing pinned yet. Full scanner files at ${new:0:12} (links followed):"
+  for f in "${files[@]}"; do
+    git cat-file -e "$new:$f" 2>/dev/null || continue
+    [[ "$(git ls-tree "$new" -- "$f" | awk '{print $1}')" == "120000" ]] && { echo "--- $f -> $(git cat-file -p "$new:$f")"; continue; }
+    echo "--- $f"
+    git --no-pager show "$new:$f"
+  done
 fi
 
 if [[ $yes -eq 0 ]]; then
