@@ -45,7 +45,7 @@ Then, in the project:
 2. Run the preflight on the existing history: `./scripts/check_secrets.sh` (needs [gitleaks](https://github.com/gitleaks/gitleaks) and a full, non-shallow clone). In an existing project it may report `.env` files, keys or personal emails from the past. Either clean the history before publishing, or, if your team legitimately commits with corporate addresses in a private repository, adjust the identity pattern in `scripts/check_secrets.sh` through a reviewed pull request.
 3. Edit `AGENTS.md`: fill in the build and test commands and anything project-specific.
 4. Put your real lint and test commands in `scripts/check.sh`. It fails on purpose until you do.
-5. Enable the hook in each clone: `git config core.hooksPath .githooks`.
+5. Enable the hook in each clone: `git config core.hooksPath .githooks` and choose the scanner it trusts: `git config forge.trustedRef refs/remotes/origin/main` (your reviewed default branch).
 6. Commit the result so every collaborator gets it. The first push that brings the forge to an existing remote needs `FORGE_BOOTSTRAP=1 git push …`, because the remote has no reviewed scanner yet ([details](docs/enforcement.md)).
 7. Protect `main` and require the `forge-gates` checks: see [docs/enforcement.md](docs/enforcement.md).
 

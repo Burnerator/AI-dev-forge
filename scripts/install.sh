@@ -109,9 +109,14 @@ for skill_dir in "$FORGE_DIR"/skills/*/; do
     echo "  skip    .agents/skills/$name (exists; use --force to overwrite)"
     continue
   fi
-  run rm -rf "$dest"
-  run mkdir -p "$TARGET/.agents/skills"
-  run cp -R "$skill_dir" "$dest"
+  # Overwrite the forge's files, keep any project-only files in the skill.
+  if [[ -L "$dest" ]]; then
+    run rm -f "$dest" # a link in place of the skill: replace the link itself
+  fi
+  while IFS= read -r -d '' src; do
+    rel="${src#"$skill_dir"}"
+    copy_file "$src" "$dest/$rel" >/dev/null
+  done < <(find "$skill_dir" -type f -print0)
   echo "  write   .agents/skills/$name"
 done
 
@@ -149,6 +154,8 @@ Done. Next steps:
   1. Edit AGENTS.md: fill in the PROJECT sections (build/test commands, style).
   2. Put your real lint + test commands in scripts/check.sh (it fails until you do).
   3. Enable the hook in each clone: git config core.hooksPath .githooks
+     and trust your reviewed default branch's scanner:
+     git config forge.trustedRef refs/remotes/origin/main
      (needs gitleaks: https://github.com/gitleaks/gitleaks#installing)
   4. Set GITHUB_PAT in your environment for the GitHub MCP server.
   5. Commit the new files, then protect main and require the forge-gates

@@ -106,10 +106,19 @@ elif [[ $gl_status -eq 3 ]]; then
   fail=1
 fi
 
-echo "==> annotated tags (messages and tagger identities)"
+echo "==> annotated tags (messages and tagger identities, nested tags included)"
+# A tag can point to another tag; git transfers the whole chain, so follow it.
+all_tags=()
+for obj in ${tags[@]+"${tags[@]}"}; do
+  while [[ "$(git cat-file -t "$obj")" == "tag" ]]; do
+    all_tags+=("$obj")
+    obj="$(git cat-file tag "$obj" | sed -n 's/^object //p' | head -1)"
+  done
+done
 tag_leaks=0
 tagger_emails=""
-for obj in ${tags[@]+"${tags[@]}"}; do
+while IFS= read -r obj; do
+  [[ -z "$obj" ]] && continue
   body="$(git cat-file tag "$obj")"
   tagger_emails+="$(sed -n 's/^tagger .*<\([^>]*\)>.*/\1/p' <<<"$body")"$'\n'
   t_status=0
@@ -121,7 +130,7 @@ for obj in ${tags[@]+"${tags[@]}"}; do
     echo "ERROR: gitleaks failed on tag ${obj:0:12} (exit $t_status)." >&2
     fail=1
   fi
-done
+done < <(printf '%s\n' ${all_tags[@]+"${all_tags[@]}"} | sort -u)
 if [[ $tag_leaks -gt 0 ]]; then
   echo "ERROR: $tag_leaks annotated tag(s) contain secrets in their message." >&2
   fail=1

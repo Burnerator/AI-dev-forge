@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # Blocks the push unless the commits being pushed pass the gates.
 #
-# 1) Secrets gate over all local refs PLUS every pushed commit (even one that no
-#    ref points to). The scanner is never taken from the working copy:
-#    - trusted: the committed scripts/check_secrets.sh (and .gitleaks.toml, if
-#      any) of the remote's default branch, as the remote reports it right now
-#      (git ls-remote --symref), or of `git config forge.trustedRef <ref>`;
-#    - if that cannot be resolved, the push is refused (fail closed);
-#    - bootstrap, only with FORGE_BOOTSTRAP=1 when the remote is empty or its
-#      default branch predates the forge: each pushed commit's own scanner.
-# 2) Quality gate: each pushed commit is checked out in a clean temporary
+# 1) Secrets gate over all local refs PLUS every pushed ref tip and its history
+#    (even a commit that no local ref points to). The scanner is never taken
+#    from the working copy, the pushed commits or the push destination. It is
+#    the committed scripts/check_secrets.sh (and .gitleaks.toml/.gitleaksignore)
+#    of the revision you trust explicitly, once per clone:
+#        git config forge.trustedRef refs/remotes/origin/main
+#    That ref holds reviewed code you fetched yourself; keep it fetched.
+#    Unset or unresolvable: the push is refused. If the trusted revision has no
+#    scanner yet (the push that introduces the forge), the push is refused
+#    unless run as FORGE_BOOTSTRAP=1 git push ..., which scans with each pushed
+#    tip's own scanner.
+# 2) Quality gate: each pushed ref tip is checked out in a clean temporary
 #    worktree (no .env, no uncommitted changes) and runs its own scripts/check.sh,
-#    so what is tested is what is published.
+#    so what is tested is what is published. Intermediate commits of a push
+#    are not run individually; CI tests every pushed tip too.
 #
 # Trust boundary: this is a guard against mistakes by the person pushing, not
 # against that person (git push --no-verify skips it). CI and branch protection
@@ -19,10 +23,6 @@
 #
 # Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
-remote="${1:-}"
-# Git passes the URL it is actually pushing to; it can differ from the fetch URL
-# (remote.<name>.pushurl), so the trusted scanner is always resolved from it.
-push_url="${2:-$remote}"
 repo_root="$(git rev-parse --show-toplevel)"
 zero="0000000000000000000000000000000000000000"
 
@@ -58,61 +58,33 @@ done
 
 [[ ${#shas[@]} -eq 0 ]] && exit 0
 
-# Resolve the trusted scanner. Never guessed from local tracking refs (they can
-# be stale or missing): either configured explicitly, or asked from the remote.
-trusted=""
+# Resolve the trusted scanner: only from an explicitly configured local ref.
 bootstrap=0
-configured="$(git -C "$repo_root" config --get forge.trustedRef || true)"
-if [[ -n "$configured" ]]; then
-  trusted="$(git -C "$repo_root" rev-parse --verify --quiet "${configured}^{commit}")" || {
-    echo "pre-push: forge.trustedRef '$configured' does not resolve to a commit; push aborted." >&2
-    exit 1
-  }
-  trusted_name="$configured"
-elif [[ -n "$push_url" ]]; then
-  if ! symref="$(git -C "$repo_root" ls-remote --symref "$push_url" HEAD 2>/dev/null)"; then
-    echo "pre-push: cannot ask the push destination for its default branch; push aborted." >&2
-    echo "  Set one explicitly: git config forge.trustedRef refs/remotes/$remote/<default-branch>" >&2
-    exit 1
-  fi
-  default_ref="$(awk '$1 == "ref:" && $3 == "HEAD" {print $2; exit}' <<<"$symref")"
-  default_sha="$(awk '$1 != "ref:" && $2 == "HEAD" {print $1; exit}' <<<"$symref")"
-  if [[ -z "$default_ref" || -z "$default_sha" ]]; then
-    bootstrap=1 # empty remote: nothing reviewed exists yet
-  else
-    if ! git -C "$repo_root" cat-file -e "${default_sha}^{commit}" 2>/dev/null; then
-      git -C "$repo_root" fetch --quiet --no-tags "$push_url" "$default_ref" || {
-        echo "pre-push: cannot fetch $default_ref from the push destination; push aborted." >&2
-        exit 1
-      }
-    fi
-    if ! git -C "$repo_root" cat-file -e "${default_sha}^{commit}" 2>/dev/null; then
-      echo "pre-push: the push destination's $default_ref is not available locally; push aborted." >&2
-      exit 1
-    fi
-    trusted="$default_sha"
-    trusted_name="${remote:-destination} ${default_ref#refs/heads/}"
-  fi
-else
-  echo "pre-push: unknown remote; set forge.trustedRef to choose the trusted scanner. Push aborted." >&2
+trusted=""
+trusted_ref="$(git -C "$repo_root" config --get forge.trustedRef || true)"
+if [[ -z "$trusted_ref" ]]; then
+  echo "pre-push: no trusted scanner configured; push aborted. Once per clone, run:" >&2
+  echo "  git config forge.trustedRef refs/remotes/origin/main   # your reviewed default branch" >&2
   exit 1
 fi
-
-if [[ -n "$trusted" ]] && ! git -C "$repo_root" cat-file -e "$trusted:scripts/check_secrets.sh" 2>/dev/null; then
-  bootstrap=1 # the default branch predates the forge
+if trusted="$(git -C "$repo_root" rev-parse --verify --quiet "${trusted_ref}^{commit}")" \
+  && git -C "$repo_root" cat-file -e "$trusted:scripts/check_secrets.sh" 2>/dev/null; then
+  :
+else
   trusted=""
+  bootstrap=1 # the trusted ref does not exist yet, or predates the forge
 fi
 
 if [[ $bootstrap -eq 1 ]]; then
   if [[ "${FORGE_BOOTSTRAP:-}" != "1" ]]; then
-    echo "pre-push: the remote's default branch has no reviewed scanner yet, so there is nothing" >&2
-    echo "  trusted to scan with. If this is the push that introduces the forge, rerun with" >&2
-    echo "  FORGE_BOOTSTRAP=1 git push ...   (each pushed commit is then scanned with its own scanner)." >&2
+    echo "pre-push: $trusted_ref has no reviewed scanner yet, so there is nothing trusted" >&2
+    echo "  to scan with. If this is the push that introduces the forge, rerun with" >&2
+    echo "  FORGE_BOOTSTRAP=1 git push ...   (each pushed tip is then scanned with its own scanner)." >&2
     exit 1
   fi
-  echo "pre-push: FORGE_BOOTSTRAP=1: using each pushed commit's own scanner."
+  echo "pre-push: FORGE_BOOTSTRAP=1: using each pushed tip's own scanner."
 else
-  echo "pre-push: secrets gate (scanner from $trusted_name @ ${trusted:0:7}; all refs + pushed commits)..."
+  echo "pre-push: secrets gate (scanner from $trusted_ref @ ${trusted:0:7}; all refs + pushed commits)..."
   wt="$(checkout "$trusted")"; worktrees+=("$wt")
   if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
     echo "pre-push: secrets gate failed, push aborted." >&2

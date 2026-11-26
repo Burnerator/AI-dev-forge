@@ -79,6 +79,13 @@ p="$tmp/linked-agents"; mkdir "$p"; ln -s "$out_dir" "$p/.agents"
 refuses "rejects a symlinked .agents directory" "$install" "$p"
 check "no skills written outside" test ! -e "$out_dir/skills"
 
+echo "--force keeps project-only files in a skill"
+p="$tmp/skill-extra"; mkdir -p "$p/.agents/skills/code-review"
+echo "ours" > "$p/.agents/skills/code-review/helper.sh"; echo "old" > "$p/.agents/skills/code-review/SKILL.md"
+"$install" --force "$p" >/dev/null
+check "project-only file kept" test "$(cat "$p/.agents/skills/code-review/helper.sh")" = ours
+check "forge file updated" grep -q '^name: code-review' "$p/.agents/skills/code-review/SKILL.md"
+
 echo ".claude/skills link is verified"
 p="$tmp/stale-link"; mkdir -p "$p/.claude"; ln -s /nonexistent/skills "$p/.claude/skills"
 out="$("$install" "$p")"

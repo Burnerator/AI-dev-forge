@@ -8,7 +8,7 @@
 |---|---|---|
 | No secrets or `.env` in git | `AGENTS.md`, `commit-message` skill | `scripts/check_secrets.sh` in `pre-push` and CI; GitHub secret scanning + push protection |
 | Commit emails are not personal | `AGENTS.md` | `check_secrets.sh` (noreply identities only) |
-| Lint and tests pass | `AGENTS.md` | `scripts/check.sh` in `pre-push` (clean worktree) and CI |
+| Lint and tests pass | `AGENTS.md` | `scripts/check.sh` at each pushed tip in `pre-push` (clean worktree) and CI |
 | No direct pushes to `main` | `AGENTS.md`, `open-pull-request` skill | Branch protection on `main` |
 | Human review of every change | `AGENTS.md`, policy | Branch protection: 1+ required approval, dismiss stale approvals |
 | Sensitive paths need an owner | `AGENTS.md` "Do not touch" | `CODEOWNERS` + "Require review from Code Owners" |
@@ -43,12 +43,11 @@ Also enable secret scanning and push protection (Settings → Code security).
 - **The hook is client-side.** A clone without `core.hooksPath`, or `git push --no-verify`, skips it. CI on every branch compensates in part.
 - **CI runs after publishing.** If a push to a branch contains a secret, it is already public (on a public repo) even if CI fails. Push protection only blocks known key formats.
 - **Branch protection covers `main` only.** Other branches accept pushes without review.
-- **Which scanner runs.** The hook never uses the working copy's scripts. It asks the remote for its default branch (`git ls-remote --symref`, so a stale or missing local tracking ref cannot mislead it) and runs the secrets gate committed there, which only changes through reviewed pull requests. To pin a different trusted ref, set `git config forge.trustedRef <ref>`. If the trusted scanner cannot be resolved, the push is refused.
+- **Which scanner runs.** The hook never runs scripts from the working copy, from the pushed commits or from the push destination. It runs the secrets gate committed at the revision you trust explicitly, once per clone: `git config forge.trustedRef refs/remotes/origin/main`. That is reviewed code you fetched yourself; keep it fetched. If the setting is missing, the push is refused.
 - **The scanner's configuration follows the scanner.** gitleaks reads `.gitleaks.toml` and `.gitleaksignore` from the checkout it scans: in the hook that is the trusted revision, so a branch cannot silence its own finding; in CI it is the pull request, so both files need required Code Owner review. Inline `gitleaks:allow` comments never suppress a finding (`--ignore-gitleaks-allow`).
-- **The destination decides.** The trusted scanner is resolved from the URL git is actually pushing to, which can differ from the fetch URL (`remote.<name>.pushurl`).
-- **Annotated tags.** Tag messages are scanned for secrets and tagger emails must be noreply, for every local tag and every pushed one. Lightweight tags carry no metadata of their own.
-- **Bootstrap is explicit.** When the remote is empty, or its default branch predates the forge, there is no reviewed scanner yet. The hook refuses the push unless you run it as `FORGE_BOOTSTRAP=1 git push …`; each pushed commit is then scanned with its own committed scanner. Use it once, for the pull request that introduces the forge.
-- `check.sh` always runs from the pushed commit, and so do both scripts in CI.
+- **Annotated tags.** Tag messages are scanned for secrets and tagger emails must be noreply, for every local tag and every pushed one, following tags that point to other tags. Lightweight tags carry no metadata of their own.
+- **Bootstrap is explicit.** When the trusted ref does not exist yet or predates the forge, there is no reviewed scanner. The hook refuses the push unless you run it as `FORGE_BOOTSTRAP=1 git push …`; each pushed tip is then scanned with its own committed scanner. Use it once, for the pull request that introduces the forge.
+- **Quality checks run at ref tips.** The hook runs `check.sh` once per pushed ref, at its tip, from that commit; intermediate commits of the same push are not run individually. The secrets gate, by contrast, covers every commit in the pushed history. In CI both scripts run from the commit under test.
 - **A commit can weaken its own gate in CI and in `check.sh`.** CI runs the scripts of the commit under test. Only required Code Owner review of those paths closes this; without it, it is a reviewer's job to catch.
 - **The hook guards against mistakes, not against the person pushing.** `git push --no-verify`, or a clone without `core.hooksPath`, skips it entirely. CI and branch protection are the controls that do not depend on the client.
 - **What is scanned.** Every local ref (`git log --all`, which includes `refs/stash`) plus each commit being pushed, merge diffs included. A secret in a stash therefore blocks pushes until the stash is dropped. Reflogs and unreachable objects that are not pushed are out of scope.
