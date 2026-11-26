@@ -1,0 +1,40 @@
+# AI-dev-forge gates. Make both jobs required checks in the branch protection of main.
+name: forge-gates
+
+on:
+  push: # every branch: anything published gets checked
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history for gitleaks and the identity check
+      - name: Install gitleaks (pinned, checksum verified)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c -
+          tar -xzf "$f" gitleaks && sudo mv gitleaks /usr/local/bin/
+      - name: Secrets gate
+        run: ./scripts/check_secrets.sh
+
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # TODO: set up your toolchain here (actions/setup-python, actions/setup-node, ...).
+      - name: Quality gate
+        run: ./scripts/check.sh

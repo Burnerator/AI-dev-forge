@@ -1,0 +1,1 @@
+../template/scripts/check_secrets.sh
