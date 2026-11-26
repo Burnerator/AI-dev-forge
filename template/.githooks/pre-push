@@ -6,7 +6,7 @@
 #    - trusted: the committed scripts/check_secrets.sh (and .gitleaks.toml, if
 #      any) of the remote's default branch, which only changes through reviewed
 #      pull requests;
-#    - fallback, when the remote has no default branch yet (first push): the
+#    - fallback, when the remote's default branch has no scanner yet (first push): the
 #      committed scanner of each pushed commit.
 # 2) Quality gate: each pushed commit is checked out in a clean temporary
 #    worktree (no .env, no uncommitted changes) and runs its own scripts/check.sh,
@@ -73,7 +73,7 @@ if [[ -n "$trusted" ]]; then
     exit 1
   fi
 else
-  echo "pre-push: no default branch on the remote yet; using each pushed commit's own scanner."
+  echo "pre-push: the remote's default branch has no committed scanner yet (first push?); using each pushed commit's own scanner."
 fi
 
 for i in "${!shas[@]}"; do
