@@ -35,7 +35,7 @@ The repository is public. Your commit email ends up in the history, so use your 
 ./scripts/check_secrets.sh  # no .env in history, no leaked keys, noreply identities
 ```
 
-`check.sh` runs `tests/test_install.sh` (installer) and `tests/test_gates.sh` (the hook and the secrets gate against throwaway repositories and a local bare remote). Both must pass before you push; the `pre-push` hook runs them for you, and CI runs them again on Ubuntu and macOS.
+`check.sh` runs `tests/test_install.sh` (installer) and `tests/test_gates.sh` (the hook and the secrets gate against throwaway repositories and a local bare remote). Changes to the CI tag path should also be checked on GitHub with `tests/e2e/github-tags.sh <owner/disposable-repo>`. Both must pass before you push; the `pre-push` hook runs them for you, and CI runs them again on Ubuntu and macOS.
 
 Never use `git push --no-verify`. If a gate blocks you and you think it is wrong, open an issue.
 

@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 shell_files=(scripts/install.sh template/scripts/check.sh template/scripts/check_secrets.sh template/scripts/trust-scanner.sh
-  template/.githooks/pre-push tests/test_install.sh tests/test_gates.sh scripts/check.sh)
+  template/.githooks/pre-push tests/test_install.sh tests/test_gates.sh tests/e2e/github-tags.sh scripts/check.sh)
 
 echo "==> bash -n"
 for f in "${shell_files[@]}"; do bash -n "$f"; done

@@ -10,8 +10,10 @@ permissions:
 # Third-party actions are pinned to a full commit SHA; tags can be moved.
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ github.ref_type == 'tag' && github.run_id || 'branch' }}
+  # Never cancel tag runs: a tag moved right after its push must still get
+  # its own (failing) run instead of disappearing unchecked.
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   secrets:

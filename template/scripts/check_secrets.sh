@@ -44,6 +44,15 @@ for f in .gitleaks.toml .gitleaksignore; do
     exit 1
   fi
 done
+# No [extend] path: rules or allowlists loaded from another file would escape
+# the pin review and the Code Owner paths. [extend] useDefault is fine.
+if [[ -f .gitleaks.toml ]] && awk '
+    /^[[:space:]]*\[/ { in_extend = ($0 ~ /^[[:space:]]*\[extend\][[:space:]]*$/) }
+    in_extend && /^[[:space:]]*path[[:space:]]*=/ { found = 1 }
+    END { exit found ? 0 : 1 }' .gitleaks.toml; then
+  echo "ERROR: .gitleaks.toml uses [extend] path; keep the whole policy in .gitleaks.toml." >&2
+  exit 1
+fi
 gl_config=()
 [[ -f .gitleaks.toml ]] && gl_config=(--config "$PWD/.gitleaks.toml")
 

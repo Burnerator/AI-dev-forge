@@ -97,6 +97,14 @@ for c in "$new" ${old:+"$old"}; do
     while IFS= read -r r; do [[ -n "$r" ]] && files+=("$r"); done <<<"$resolved"
   done
 done
+# The policy must be self-contained: no [extend] path to an unreviewed file.
+if git cat-file -e "$new:.gitleaks.toml" 2>/dev/null && git cat-file -p "$new:.gitleaks.toml" | awk '
+    /^[[:space:]]*\[/ { in_extend = ($0 ~ /^[[:space:]]*\[extend\][[:space:]]*$/) }
+    in_extend && /^[[:space:]]*path[[:space:]]*=/ { found = 1 }
+    END { exit found ? 0 : 1 }'; then
+  echo "Not changed: .gitleaks.toml at ${new:0:12} uses [extend] path, which this review cannot cover." >&2
+  exit 1
+fi
 # The scanner itself must end at a tracked executable.
 scanner_final="$(resolve "$new" scripts/check_secrets.sh | tail -1)"
 if [[ "$(git ls-tree "$new" -- "$scanner_final" | awk '{print $1}')" != "100755" ]]; then

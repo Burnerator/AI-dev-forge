@@ -254,6 +254,12 @@ p="$tmp/tag-headerlike"; new_project "$p"
 git -C "$p" tag -a v2 -m "release notes" -m "tagger Someone <someone@example.com> 0 +0000"
 check "a header-like line in a tag message is not taken as the tagger" secrets "$p"
 
+p="$tmp/policy-extend"; new_project "$p"
+printf '[extend]\nuseDefault = true\npath = "allow.toml"\n' > "$p/.gitleaks.toml"
+rejects "refuses [extend] path in .gitleaks.toml" "uses \\[extend\\] path" secrets "$p"
+printf '[extend]\nuseDefault = true\n' > "$p/.gitleaks.toml"
+check "allows [extend] useDefault alone" secrets "$p"
+
 p="$tmp/policy-link"; new_project "$p"
 echo 'title = "x"' > "$p/policy.toml"; ln -s policy.toml "$p/.gitleaks.toml"
 rejects "refuses a symlinked .gitleaks.toml" "must be regular files" secrets "$p"
@@ -444,6 +450,36 @@ else
   echo "  skip real LFS round trip (git-lfs not installed)"
 fi
 
+p="$tmp/push-filter"; new_project "$p"
+# The pinned commit itself carries an attribute that selects a filter the
+# developer has configured locally; the filter would swap the scanner for a stub.
+marker="$tmp/smudge.ran"
+echo 'scripts/check_secrets.sh filter=evil' > "$p/.gitattributes"
+git -C "$p" add .gitattributes; git -C "$p" commit -qm "attribute on the scanner"
+git -C "$p" config filter.evil.smudge "sh -c 'cat >/dev/null; touch $marker; printf \"#!/usr/bin/env bash\\nexit 0\\n\"'"
+git -C "$p" config filter.evil.clean cat
+bootstrap_push "$p" main
+git -C "$p" switch -qc feat/filter
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add -A; git -C "$p" commit -qm "add config"
+rm -f "$marker"
+rejects_all "a filter selected by committed attributes cannot swap the pinned scanner" "scanner from pinned commit" "$LEAK" git -C "$p" push origin feat/filter
+check "no smudge filter ran during the gates" test ! -e "$marker"
+
+p="$tmp/push-lfs-second"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"
+git -C "$p" add -A; git -C "$p" commit -qm "lfs pointer in an ancestor"
+PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main # origin now has the LFS history
+git -C "$p" config forge.trustedCommit "$(git -C "$p" rev-parse main)"
+git -C "$p" rm -q .gitattributes; git -C "$p" commit -qm "attributes removed"
+PATH="$lfsbin:$PATH" git -C "$p" push -q origin main # origin has the whole LFS history
+echo more > "$p/notes.txt"; git -C "$p" add notes.txt; git -C "$p" commit -qm "unrelated tip"
+git init -q --bare -b main "$p.second.git"; git -C "$p" remote add second "$p.second.git"
+rm -f "$lfsmark"
+check "push to a second remote" env PATH="$lfsbin:$PATH" git -C "$p" push -q second main
+check "git lfs pre-push ran for history the second remote lacks" grep -q "^pre-push second" "$lfsmark"
+
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main
 echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
@@ -528,6 +564,13 @@ git -C "$p" add -A; git -C "$p" commit -qm "scanner marked binary with a textcon
 check "fixture: plain git diff hides the change" test -z "$(git -C "$p" diff HEAD~1 HEAD -- scripts/check_secrets.sh | grep '^+.*hidden-change')"
 out="$(trust "$p" --yes HEAD)"
 check "the pin diff shows the literal change despite binary/textconv" grep -q '^+# hidden-change' <<<"$out"
+
+p="$tmp/trust-extend"; new_project "$p"
+trust "$p" --yes HEAD >/dev/null; good="$(git -C "$p" config forge.trustedCommit)"
+printf '[extend]\npath = "allow.toml"\n' > "$p/.gitleaks.toml"; echo 'title="a"' > "$p/allow.toml"
+git -C "$p" add -A; git -C "$p" commit -qm "policy via extend path"
+rejects "refuses to pin a policy with [extend] path" "uses \\[extend\\] path" trust "$p" --yes HEAD
+check "the pin is untouched ([extend] path)" test "$(git -C "$p" config forge.trustedCommit)" = "$good"
 
 for kind in absolute escaping; do
   p="$tmp/trust-bad-$kind"; new_project "$p"
