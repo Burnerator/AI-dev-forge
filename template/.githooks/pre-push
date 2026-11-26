@@ -45,7 +45,9 @@ trap cleanup EXIT
 checkout() {
   local wt
   wt="$(mktemp -d "${TMPDIR:-/tmp}/prepush.XXXXXX")" || return 1
-  if ! git -C "$repo_root" worktree add --quiet --detach "$wt" "$1" >&2; then
+  # Hooks off: a post-checkout hook from the project must not run pushed code
+  # before the gates, or alter the checkout they test.
+  if ! git -C "$repo_root" -c core.hooksPath=/dev/null worktree add --quiet --detach "$wt" "$1" >&2; then
     rm -rf "$wt"
     return 1
   fi

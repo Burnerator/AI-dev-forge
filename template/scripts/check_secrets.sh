@@ -93,7 +93,8 @@ echo "==> .env files in history (incl. merge commits)"
 paths_file="$(mktemp)"
 trap 'rm -f "$paths_file"' EXIT
 # A failed git log must abort, never look like "no matches".
-git log ${scope[@]+"${scope[@]}"} -m --name-only -z --format= ${revs[@]+"${revs[@]}"} >"$paths_file" \
+# --root: show what the root commit adds, whatever log.showRoot says.
+git log ${scope[@]+"${scope[@]}"} --root -m --name-only -z --format= ${revs[@]+"${revs[@]}"} >"$paths_file" \
   || { echo "ERROR: git log failed" >&2; exit 1; }
 env_count=0
 while IFS= read -r -d '' path; do
@@ -118,7 +119,7 @@ fi
 # --text: include the contents of files git classifies as binary.
 # Built without stray spaces: gitleaks splits this string, and an empty word
 # becomes an empty pathspec that makes git log scan nothing.
-log_words=(${scope[@]+"${scope[@]}"} -m --text ${revs[@]+"${revs[@]}"})
+log_words=(${scope[@]+"${scope[@]}"} --root -m --text ${revs[@]+"${revs[@]}"})
 log_opts="${log_words[*]}"
 report="$(mktemp)"
 trap 'rm -f "$paths_file" "$report"' EXIT
@@ -182,7 +183,9 @@ tagger_emails=""
 while IFS= read -r obj; do
   [[ -z "$obj" ]] && continue
   body="$(git cat-file tag "$obj")"
-  tagger_emails+="$(sed -n 's/^tagger .*<\([^>]*\)>.*/\1/p' <<<"$body")"$'\n'
+  # Header block only (up to the first blank line): the message may contain
+  # lines that look like headers.
+  tagger_emails+="$(sed -n '/^$/q; s/^tagger .*<\([^>]*\)>.*/\1/p' <<<"$body")"$'\n'
   t_status=0
   git cat-file tag "$obj" | gitleaks stdin ${gl_config[@]+"${gl_config[@]}"} --redact --no-banner --no-color --exit-code 3 \
     --ignore-gitleaks-allow >/dev/null 2>&1 || t_status=$?

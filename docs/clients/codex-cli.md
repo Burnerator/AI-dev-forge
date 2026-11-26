@@ -1,5 +1,7 @@
 # Codex CLI
 
+> **Verification status (2026-11-26):** the paths and settings below follow the vendor's documentation and the cross-client conventions; the maintainers have not yet verified them end to end in this client. If something differs in your version, please open an issue with the version you tested. Only the installer's output and the forge's gates are covered by tests.
+
 ## Rules
 
 Codex CLI reads `AGENTS.md` natively, from the repository root and from nested folders. Nothing else is needed.

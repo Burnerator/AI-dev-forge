@@ -213,6 +213,25 @@ git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
 rejects "ignores GITLEAKS_CONFIG from the environment" "$LEAK" env GITLEAKS_CONFIG="$tmp/permissive.toml" bash "$p/scripts/check_secrets.sh"
 rejects "ignores GITLEAKS_CONFIG_TOML from the environment" "$LEAK" env GITLEAKS_CONFIG_TOML="$(cat "$tmp/permissive.toml")" bash "$p/scripts/check_secrets.sh"
 
+# Root commit: the very first commit of a repository, with log.showRoot=false.
+p="$tmp/root-env"; mkdir -p "$p"; git -C "$p" init -q -b main
+git -C "$p" config user.name test; git -C "$p" config user.email "1+test@users.noreply.github.com"
+git -C "$p" config log.showRoot false
+"$forge/scripts/install.sh" "$p" >/dev/null
+echo "X=1" > "$p/.env"; git -C "$p" add -A; git -C "$p" add -f .env; git -C "$p" commit -qm root
+check "fixture: HEAD is a root commit" test "$(git -C "$p" rev-list --count HEAD)" = 1
+rejects "finds a .env added in the root commit with log.showRoot=false" "$ENV" secrets "$p"
+p="$tmp/root-token"; mkdir -p "$p"; git -C "$p" init -q -b main
+git -C "$p" config user.name test; git -C "$p" config user.email "1+test@users.noreply.github.com"
+git -C "$p" config log.showRoot false
+"$forge/scripts/install.sh" "$p" >/dev/null
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"; git -C "$p" add -A; git -C "$p" commit -qm root
+rejects "finds a token added in the root commit with log.showRoot=false" "$LEAK" secrets "$p"
+
+p="$tmp/tag-headerlike"; new_project "$p"
+git -C "$p" tag -a v2 -m "release notes" -m "tagger Someone <someone@example.com> 0 +0000"
+check "a header-like line in a tag message is not taken as the tagger" secrets "$p"
+
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
 rejects "refuses a first push without explicit bootstrap" "no reviewed scanner yet" git -C "$p" push origin main
@@ -312,6 +331,14 @@ status=0; out="$(TMPDIR="$tmp/does-not-exist" git -C "$p" push origin main 2>&1)
 check "stops when it cannot create a clean checkout" test "$status" -ne 0
 check "says so" grep -q "cannot create a clean checkout" <<<"$out"
 check "no gate ran on an incomplete checkout" test -z "$(grep -E 'checks ok|==> ' <<<"$out")"
+
+p="$tmp/push-postcheckout"; new_project "$p"
+marker="$tmp/post-checkout.ran"
+printf '#!/usr/bin/env bash\ntouch "%s"\n' "$marker" > "$p/.githooks/post-checkout"; chmod +x "$p/.githooks/post-checkout"
+git -C "$p" add .githooks/post-checkout; git -C "$p" commit -qm "add post-checkout hook"
+rm -f "$marker"
+check "push with a post-checkout hook in the project" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "the project's post-checkout hook never ran during the gates" test ! -e "$marker"
 
 p="$tmp/push-msg"; new_project "$p"
 FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
