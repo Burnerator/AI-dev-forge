@@ -21,9 +21,12 @@ bearer_token_env_var = "GITHUB_PAT"
 Then export your token before starting Codex:
 
 ```bash
-export GITHUB_PAT=<your fine-grained token>
+# Prompt for the token without echoing it or saving it in shell history:
+read -rs -p "GitHub token: " GITHUB_PAT && export GITHUB_PAT && echo
 codex
 ```
+
+Better still, keep the token in your OS secret store and load it from there, for example on macOS: `export GITHUB_PAT="$(security find-generic-password -s github-mcp -w)"`. Never paste it into a file in the repository.
 
 See the Codex documentation for the current list of configuration options, including project-level configuration.
 

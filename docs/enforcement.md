@@ -12,7 +12,8 @@
 | No direct pushes to `main` | `AGENTS.md`, `open-pull-request` skill | Branch protection on `main` |
 | Human review of every change | `AGENTS.md`, policy | Branch protection: 1+ required approval, dismiss stale approvals |
 | Sensitive paths need an owner | `AGENTS.md` "Do not touch" | `CODEOWNERS` + "Require review from Code Owners" |
-| Gates are not weakened silently | `AGENTS.md` | `CODEOWNERS` on `.githooks/`, `scripts/`, `.github/workflows/` |
+| Gates are not weakened silently | `AGENTS.md` | `CODEOWNERS` on `.githooks/`, `scripts/`, `.github/`, scanner config, plus **required** Code Owner review |
+| CI runs what was reviewed | — | Actions pinned to a full commit SHA; scanner binary checksum-verified |
 
 ## Set up branch protection on `main`
 
@@ -22,13 +23,17 @@ In the repository settings (Rules → Rulesets, or Branches → Branch protectio
 - dismiss stale approvals when new commits are pushed;
 - require status checks to pass: `forge-gates / secrets` and `forge-gates / checks`;
 - block force pushes and deletions;
-- optionally require review from Code Owners, with a `CODEOWNERS` file such as:
+- require review from Code Owners, with a `CODEOWNERS` file that covers the gates, the scanner configuration and the ownership file itself:
 
 ```
 /.githooks/          @your-org/maintainers
 /scripts/            @your-org/maintainers
-/.github/workflows/  @your-org/maintainers
+/.github/            @your-org/maintainers
+/.gitleaks.toml      @your-org/maintainers
+/CODEOWNERS          @your-org/maintainers
 ```
+
+The gates are code that runs on every push and in CI, and a pull request can change them. Without required Code Owner review, the "gates are not weakened silently" row above is only a convention. A solo maintainer cannot approve their own pull request, so a one-person project relies on reading every diff to those paths instead; say so in your `AGENTS.md`.
 
 Also enable secret scanning and push protection (Settings → Code security).
 
@@ -37,6 +42,7 @@ Also enable secret scanning and push protection (Settings → Code security).
 - **The hook is client-side.** A clone without `core.hooksPath`, or `git push --no-verify`, skips it. CI on every branch compensates in part.
 - **CI runs after publishing.** If a push to a branch contains a secret, it is already public (on a public repo) even if CI fails. Push protection only blocks known key formats.
 - **Branch protection covers `main` only.** Other branches accept pushes without review.
-- **A commit can weaken its own gate.** The hook runs the `check.sh` of the commit being pushed. Code Owners on the gate files and reviewing their diffs compensate.
+- **A commit can weaken its own gate.** The hook and CI run the `check.sh` and `check_secrets.sh` of the commit being pushed. Only required Code Owner review of those paths closes this; without it, it is a reviewer's job to catch.
+- **The hook scans pushed commits, not reflogs or stashes.** It checks every ref plus each commit being pushed, merge diffs included; objects that are never pushed are out of scope.
 - **gitleaks matches known patterns.** It does not find arbitrary personal data in file contents or commit messages. Every diff still needs a human read before it is published.
 - **If something sensitive leaks:** revoke or rotate it first. Deleting or rewriting history does not remove copies already made (forks, caches, clones).

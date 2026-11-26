@@ -25,9 +25,12 @@ and re-copy them when the forge's skills change.
 `template/.mcp.json` configures the GitHub MCP server for the project. It reads your token from the `GITHUB_PAT` environment variable:
 
 ```bash
-export GITHUB_PAT=<your fine-grained token>
+# Prompt for the token without echoing it or saving it in shell history:
+read -rs -p "GitHub token: " GITHUB_PAT && export GITHUB_PAT && echo
 claude
 ```
+
+Better still, keep the token in your OS secret store and load it from there, for example on macOS: `export GITHUB_PAT="$(security find-generic-password -s github-mcp -w)"`. Never paste it into a file in the repository.
 
 Claude Code asks you to approve project MCP servers the first time. Check them with `/mcp`.
 

@@ -12,3 +12,10 @@ All notable changes to this project are documented here. Format: [Keep a Changel
 - Gates for adopting projects: `pre-push` hook, `scripts/check.sh`, `scripts/check_secrets.sh`, `forge-gates` CI workflow and a PR template with AI disclosure.
 - Team AI usage policy, per-client guides, and an enforcement guide with its limits.
 - Installer (`scripts/install.sh`) with `--dry-run` and `--force`, and its tests.
+- Gate integration tests (`tests/test_gates.sh`) against throwaway repositories and a local bare remote.
+
+### Security
+
+- Secrets gate scans merge diffs (`git log -m`), reads paths NUL-delimited, scans commits passed by the hook even when no ref points to them, and fails closed if gitleaks errors or scans nothing.
+- Installer refuses to write through symlinked directories and never follows a symlinked destination.
+- CI actions pinned to a full commit SHA.

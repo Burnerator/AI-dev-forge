@@ -12,7 +12,7 @@ Every developer keeps their own forge (their machine, their AI client, their wor
 | Policy | — (team-defined) | What agents may do on their own, attribution, review | `policy/ai-usage-policy.md` |
 | Gates | git hooks + CI + branch protection | What must always hold: no secrets, lint and tests pass, reviewed merges | `.githooks/`, `scripts/`, `.github/` |
 
-Anything that **must** hold (formatting, tests passing, protected branches, required reviewers) is enforced by deterministic tooling: linters, pre-commit hooks, CI and GitHub branch protection. The AI rules help developers meet those requirements; the pipeline guarantees them. The forge ships those gates too, and [docs/enforcement.md](docs/enforcement.md) maps each rule to the gate that enforces it and says plainly what the gates do not cover.
+Anything that **must** hold (formatting, tests passing, protected branches, required reviewers) is enforced by deterministic tooling: linters, pre-commit hooks, CI and GitHub branch protection. The AI rules help developers meet those requirements; the pipeline guarantees them. The forge ships those gates too. They hold only as far as the repository settings back them (branch protection, required checks and required Code Owner review of the gate files): [docs/enforcement.md](docs/enforcement.md) maps each rule to its gate and says plainly what the gates do not cover.
 
 ## Supported clients
 
@@ -67,7 +67,7 @@ skills/                   Shared Agent Skills
 policy/                   Team policy on AI use
 docs/                     Per-client guides, MCP notes, enforcement and its limits
 scripts/install.sh        Installer
-tests/                    Installer tests (run in CI)
+tests/                    Installer and gate integration tests (run in CI)
 ```
 
 ## Contributing

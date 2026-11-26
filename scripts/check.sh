@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 shell_files=(scripts/install.sh template/scripts/check.sh template/scripts/check_secrets.sh
-  template/.githooks/pre-push tests/test_install.sh scripts/check.sh)
+  template/.githooks/pre-push tests/test_install.sh tests/test_gates.sh scripts/check.sh)
 
 echo "==> bash -n"
 for f in "${shell_files[@]}"; do bash -n "$f"; done
@@ -35,5 +35,9 @@ done
 
 echo "==> installer tests"
 bash tests/test_install.sh
+
+echo "==> gate integration tests (needs gitleaks)"
+command -v gitleaks >/dev/null 2>&1 || { echo "ERROR: gitleaks not installed." >&2; exit 1; }
+bash tests/test_gates.sh
 
 echo "==> OK: all checks passed"

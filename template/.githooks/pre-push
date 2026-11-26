@@ -1,30 +1,44 @@
 #!/usr/bin/env bash
 # Blocks the push unless the commits being pushed pass the gates.
-# Each pushed ref is checked out in a clean temporary worktree (no .env, no
-# uncommitted changes), so what is tested is what is published.
+# 1) Secrets gate over all refs PLUS every pushed commit (even one no ref points to).
+# 2) Quality gate: each pushed commit is checked out in a clean temporary worktree
+#    (no .env, no uncommitted changes), so what is tested is what is published.
 # Enable once per clone: git config core.hooksPath .githooks
 set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 zero="0000000000000000000000000000000000000000"
 
-echo "pre-push: secrets gate (full history)..."
-if ! "$repo_root/scripts/check_secrets.sh"; then
+# Read what is being pushed before running any gate.
+refs=()
+shas=()
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+  [[ "$local_sha" == "$zero" ]] && continue # branch deletion: nothing to test
+  if ! git -C "$repo_root" cat-file -e "${local_sha}^{commit}" 2>/dev/null; then
+    echo "pre-push: $local_ref @ $local_sha is not a commit; refusing to push it unchecked." >&2
+    exit 1
+  fi
+  refs+=("$local_ref")
+  shas+=("$local_sha")
+done
+
+[[ ${#shas[@]} -eq 0 ]] && exit 0
+
+echo "pre-push: secrets gate (all refs + pushed commits)..."
+if ! "$repo_root/scripts/check_secrets.sh" "${shas[@]}"; then
   echo "pre-push: secrets gate failed, push aborted." >&2
   exit 1
 fi
 
-status=0
-while read -r local_ref local_sha _remote_ref _remote_sha; do
-  [[ "$local_sha" == "$zero" ]] && continue # branch deletion: nothing to test
+for i in "${!shas[@]}"; do
+  sha="${shas[$i]}"
   wt="$(mktemp -d "${TMPDIR:-/tmp}/prepush.XXXXXX")"
-  git -C "$repo_root" worktree add --quiet --detach "$wt" "$local_sha"
-  echo "pre-push: quality gate on $local_ref @ ${local_sha:0:7} (clean checkout)..."
-  if ! (cd "$wt" && ./scripts/check.sh); then
-    echo "pre-push: checks failed for $local_ref @ ${local_sha:0:7}, push aborted." >&2
-    status=1
-  fi
+  git -C "$repo_root" worktree add --quiet --detach "$wt" "$sha"
+  echo "pre-push: quality gate on ${refs[$i]} @ ${sha:0:7} (clean checkout)..."
+  status=0
+  (cd "$wt" && ./scripts/check.sh) || status=$?
   git -C "$repo_root" worktree remove --force "$wt"
-  [[ $status -ne 0 ]] && break
+  if [[ $status -ne 0 ]]; then
+    echo "pre-push: checks failed for ${refs[$i]} @ ${sha:0:7}, push aborted." >&2
+    exit 1
+  fi
 done
-
-exit $status

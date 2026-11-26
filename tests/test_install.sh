@@ -59,6 +59,26 @@ p="$tmp/dry"; mkdir "$p"
 "$install" --dry-run "$p" >/dev/null
 check "directory still empty" test -z "$(ls -A "$p")"
 
+echo "symlinks never redirect writes outside the project"
+out_dir="$tmp/outside"; mkdir -p "$out_dir"
+echo "sentinel" > "$out_dir/AGENTS.md"
+p="$tmp/linked-parent"; mkdir "$p"; ln -s "$out_dir" "$p/scripts"
+refuses "rejects a symlinked parent directory" "$install" "$p"
+refuses "rejects a symlinked parent directory with --force" "$install" --force "$p"
+check "nothing written outside through the parent link" test "$(ls "$out_dir")" = AGENTS.md
+p="$tmp/linked-file"; mkdir "$p"; ln -s "$out_dir/AGENTS.md" "$p/AGENTS.md"
+"$install" "$p" >/dev/null
+check "skips a symlinked destination" test -L "$p/AGENTS.md"
+"$install" --force "$p" >/dev/null
+check "--force replaces the link, not its target" test ! -L "$p/AGENTS.md"
+check "link target untouched" test "$(cat "$out_dir/AGENTS.md")" = sentinel
+p="$tmp/dangling"; mkdir "$p"; ln -s "$out_dir/new-file" "$p/CLAUDE.md"
+"$install" "$p" >/dev/null
+check "does not write through a dangling link" test ! -e "$out_dir/new-file"
+p="$tmp/linked-agents"; mkdir "$p"; ln -s "$out_dir" "$p/.agents"
+refuses "rejects a symlinked .agents directory" "$install" "$p"
+check "no skills written outside" test ! -e "$out_dir/skills"
+
 echo "refusals"
 refuses "rejects missing directory" "$install" "$tmp/nope"
 refuses "rejects installing into the forge" "$install" "$forge"
