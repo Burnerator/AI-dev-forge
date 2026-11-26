@@ -24,6 +24,7 @@ git config user.email "1+forge-e2e@users.noreply.github.com"
 printf '#!/usr/bin/env bash\necho "checks ok"\n' > scripts/check.sh
 git add -A && git commit -qm "chore: forge e2e fixture"
 git remote add origin "https://github.com/$repo.git"
+started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 git push -q --force origin main
 for t in $(git ls-remote --tags origin | awk '{print $2}' | grep -v '\^{}$'); do git push -q origin ":$t"; done
 
@@ -40,7 +41,7 @@ git push -q --force origin refs/tags/e2e-moved
 
 echo "waiting for workflow runs..."
 expected_runs=6 # 5 tag pushes + the moved tag pushed again
-until [[ "$(gh run list -R "$repo" --limit 50 --json headBranch -q '[.[]|select(.headBranch|startswith("e2e-"))]|length')" -ge $expected_runs ]] \
+until [[ "$(gh run list -R "$repo" --limit 50 --json headBranch,createdAt -q "[.[]|select((.headBranch|startswith(\"e2e-\")) and .createdAt >= \"$started\")]|length")" -ge $expected_runs ]] \
   && [[ "$(gh run list -R "$repo" --json status -q '[.[]|select(.status!="completed")]|length')" == 0 ]]; do
   sleep 10
 done
@@ -48,12 +49,14 @@ done
 fails=0
 expect() { # expect <tag> <success|failure> [diagnostic]
   local tag="$1" want="$2" pattern="${3:-}" ids id ok=0
-  ids="$(gh run list -R "$repo" --limit 50 --json headBranch,databaseId,conclusion,headSha \
-    -q ".[]|select(.headBranch==\"$tag\")|\"\(.databaseId) \(.conclusion)\"")"
+  # Only runs created by this invocation.
+  ids="$(gh run list -R "$repo" --limit 50 --json headBranch,databaseId,conclusion,createdAt \
+    -q ".[]|select(.headBranch==\"$tag\" and .createdAt >= \"$started\")|\"\(.databaseId) \(.conclusion)\"")"
   while read -r id concl; do
     [[ -z "$id" ]] && continue
     if [[ "$concl" == "$want" ]]; then
-      if [[ -z "$pattern" ]] || gh run view "$id" -R "$repo" --log-failed 2>/dev/null | grep -qE "$pattern"; then ok=1; fi
+      # gh run view can hang while fetching logs: cap it (perl is on macOS and Linux).
+      if [[ -z "$pattern" ]] || perl -e 'alarm 90; exec @ARGV' gh run view "$id" -R "$repo" --log-failed 2>/dev/null | grep -qE "$pattern"; then ok=1; fi
     fi
   done <<<"$ids"
   if [[ $ok -eq 1 ]]; then echo "  ok   $tag: $want${pattern:+ ($pattern)}"; else echo "  FAIL $tag: expected $want${pattern:+ ($pattern)}" >&2; fails=$((fails + 1)); fi
