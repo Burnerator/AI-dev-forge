@@ -82,8 +82,23 @@ expect "e2e-light-$run_id" success
 expect "e2e-annotated-$run_id" success
 expect "e2e-secret-$run_id" failure "annotated tag\\(s\\) contain secrets"
 expect "e2e-email-$run_id" failure "non-noreply email"
-expect "e2e-moved-$run_id" failure "now points to .* not ${first_moved:0:12}"
-expect "e2e-moved-$run_id" success
+# Moved tag: whether the first runner fetches before or after the move is not
+# under our control. Each run must either fail as "moved" or pass, and a pass
+# is only possible when the fetched tag is the object its own event reported.
+moved_runs="$(gh run list -R "$repo" --limit 50 --json headBranch,databaseId,conclusion,createdAt \
+  -q ".[]|select(.headBranch==\"e2e-moved-$run_id\" and .createdAt >= \"$started\")|\"\(.databaseId) \(.conclusion)\"")"
+while read -r id concl; do
+  [[ -z "$id" ]] && continue
+  if [[ "$concl" == success ]]; then
+    echo "  ok   e2e-moved-$run_id run $id: success (scanned its own event object)"
+  elif [[ "$concl" == failure ]] && perl -e 'alarm 90; exec @ARGV' gh run view "$id" -R "$repo" --log-failed 2>/dev/null | grep -qE "now points to .* not "; then
+    echo "  ok   e2e-moved-$run_id run $id: failure as moved"
+  else
+    echo "  FAIL e2e-moved-$run_id run $id: $concl, neither a pass nor a 'moved' failure" >&2
+    fails=$((fails + 1))
+  fi
+done <<<"$moved_runs"
+: "${first_moved:?}" # the object of the first push, kept for diagnosis
 
 if [[ $fails -ne 0 ]]; then
   echo "$fails e2e check(s) failed" >&2

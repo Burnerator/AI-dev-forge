@@ -39,6 +39,18 @@ refuses "check.sh placeholder fails until configured" "$p/scripts/check.sh"
 mkdir -p "$tmp/steps"; steps="$("$install" "$tmp/steps" | sed -n '/Next steps/,$p')"
 check "next steps: bootstrap push comes before pinning" test "$(grep -n 'FORGE_BOOTSTRAP=1' <<<"$steps" | head -1 | cut -d: -f1)" -lt "$(grep -n 'trust-scanner.sh' <<<"$steps" | head -1 | cut -d: -f1)"
 
+echo "warns about hooks that core.hooksPath would switch off"
+p="$tmp/other-hooks"; mkdir -p "$p"; git -C "$p" init -q
+printf '#!/bin/sh\nexit 0\n' > "$p/.git/hooks/pre-commit"; chmod +x "$p/.git/hooks/pre-commit"
+printf '#!/bin/sh\nexit 0\n' > "$p/.git/hooks/commit-msg"; chmod +x "$p/.git/hooks/commit-msg"
+printf '#!/bin/sh\nexit 0\n' > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks/pre-push"
+out="$("$install" "$p")"
+check "names the hooks it would disable" grep -q "commit-msg pre-commit" <<<"$out"
+check "does not list pre-push (chained) or samples" test -z "$(grep -E 'WARNING.*' -A1 <<<"$out" | grep -E 'pre-push|\.sample')"
+p="$tmp/no-other-hooks"; mkdir -p "$p"; git -C "$p" init -q
+out="$("$install" "$p")"
+check "no warning when only sample hooks exist" test -z "$(grep WARNING <<<"$out")"
+
 echo "idempotent"
 before="$(snapshot "$p")"
 out="$("$install" "$p")"

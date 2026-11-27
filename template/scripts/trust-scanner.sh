@@ -9,6 +9,9 @@
 #   run this again, after reading the diff, to accept a new scanner version.
 set -euo pipefail
 export GIT_NO_REPLACE_OBJECTS=1
+# Legacy grafts (.git/info/grafts) could rewrite the ancestry the scans walk
+# while a push still sends the real history: ignore them.
+export GIT_GRAFT_FILE=/nonexistent/forge-ignores-grafts # a path that never exists; /dev/null would count as a graft file
 
 yes=0
 if [[ "${1:-}" == "--yes" ]]; then yes=1; shift; fi

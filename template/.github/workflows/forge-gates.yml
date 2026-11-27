@@ -12,10 +12,11 @@ permissions:
 # Pin any action you add (setup-python, setup-node, ...) the same way.
 
 concurrency:
-  group: forge-gates-${{ github.ref }}-${{ github.ref_type == 'tag' && github.run_id || 'branch' }}
-  # Never cancel tag runs: a tag moved right after its push must still get
-  # its own (failing) run instead of disappearing unchecked.
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  # Pull requests: one group per PR, newer runs cancel older ones. Pushes
+  # (branches and tags): a group per run, never cancelled, so every pushed
+  # history is scanned even if a later force-push removes it from the ref.
+  group: forge-gates-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   secrets:

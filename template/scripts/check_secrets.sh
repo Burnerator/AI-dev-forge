@@ -33,6 +33,9 @@ fail=0
 # Read the real objects: replacement refs (git replace) would otherwise let the
 # scan see substitute content while a push transfers the original commits.
 export GIT_NO_REPLACE_OBJECTS=1
+# Legacy grafts (.git/info/grafts) could rewrite the ancestry the scans walk
+# while a push still sends the real history: ignore them.
+export GIT_GRAFT_FILE=/nonexistent/forge-ignores-grafts # a path that never exists; /dev/null would count as a graft file
 # The scanner policy is the reviewed one in this checkout or gitleaks' built-in
 # rules, never an override inherited from the environment.
 unset GITLEAKS_CONFIG GITLEAKS_CONFIG_TOML

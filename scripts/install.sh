@@ -186,6 +186,27 @@ else
   fi
 fi
 
+# core.hooksPath replaces the whole hooks directory: the forge chains only
+# pre-push, so warn about every other active hook it would switch off.
+if hooks_dir="$(git -C "$TARGET" rev-parse --git-common-dir 2>/dev/null)"; then
+  [[ "$hooks_dir" != /* ]] && hooks_dir="$TARGET/$hooks_dir"
+  hooks_dir="$hooks_dir/hooks"
+  others=()
+  for h in "$hooks_dir"/*; do
+    [[ -f "$h" && -x "$h" ]] || continue
+    name="$(basename "$h")"
+    [[ "$name" == *.sample || "$name" == pre-push ]] && continue
+    others+=("$name")
+  done
+  if [[ ${#others[@]} -gt 0 ]]; then
+    echo
+    echo "WARNING: enabling core.hooksPath=.githooks switches off these active hooks in"
+    echo "  ${hooks_dir#"$TARGET"/}: ${others[*]}"
+    echo "  The forge's pre-push hook chains only pre-push. Copy (or symlink) the others"
+    echo "  into .githooks/ before enabling it, or they will silently stop running."
+  fi
+fi
+
 cat <<'EOF'
 
 Done. Next steps (details in the AI-dev-forge README):

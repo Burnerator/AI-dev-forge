@@ -7,7 +7,7 @@ set -euo pipefail
 # runs inside a FORGE_BOOTSTRAP=1 push of the forge).
 unset FORGE_BOOTSTRAP
 # The hook exports this; the replacement fixture needs git's default behaviour.
-unset GIT_NO_REPLACE_OBJECTS
+unset GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE
 forge="$(cd "$(dirname "$0")/.." && pwd -P)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -276,6 +276,14 @@ p="$tmp/policy-link"; new_project "$p"
 echo 'title = "x"' > "$p/policy.toml"; ln -s policy.toml "$p/.gitleaks.toml"
 rejects "refuses a symlinked .gitleaks.toml" "must be regular files" secrets "$p"
 
+p="$tmp/grafts"; new_project "$p"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+git -C "$p" rm -q config.txt; git -C "$p" commit -qm "remove config"
+git -C "$p" rev-parse HEAD > "$p/.git/info/grafts" # HEAD now looks like a root commit
+check "fixture: with the graft, git log hides the secret commit" test "$(git -C "$p" log --oneline 2>/dev/null | wc -l | tr -d ' ')" = 1
+rejects "ignores legacy grafts and scans the real ancestry" "$LEAK" secrets "$p"
+
 echo "pre-push hook"
 p="$tmp/push-ok"; new_project "$p"
 rejects "refuses a first push without explicit bootstrap" "no trusted scanner pinned" git -C "$p" push origin main
@@ -505,6 +513,25 @@ git -C "$p" config remote.origin.pushurl "$p.push.git" # pushes go elsewhere
 rm -f "$lfsmark"
 check "push to a pushurl different from the fetch URL" env PATH="$lfsbin:$PATH" git -C "$p" push -q origin main
 check "git lfs pre-push ran despite tracking refs for the fetch URL" grep -q "refs/heads/main" "$lfsmark"
+
+p="$tmp/push-tag-oid"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" -c user.email=someone@example.com tag -a vx -m "release"
+tagobj="$(git -C "$p" rev-parse vx)"
+git -C "$p" update-ref -d refs/tags/vx # no local ref points to the tag object any more
+check "fixture: no local tag ref" test -z "$(git -C "$p" for-each-ref refs/tags)"
+rejects "blocks an annotated tag pushed by object ID with a personal tagger" "non-noreply email" git -C "$p" push origin "$tagobj:refs/tags/vx"
+check "the tag did not reach the remote" no_remote_ref "$p.remote.git" refs/tags/vx
+
+p="$tmp/push-grafts"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" switch -qc feat/g
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+git -C "$p" rm -q config.txt; git -C "$p" commit -qm "remove config"
+echo "$(git -C "$p" rev-parse HEAD) $(git -C "$p" rev-parse main)" > "$p/.git/info/grafts" # skip the secret commit
+rejects "the hook ignores grafts that hide a pushed secret" "$LEAK" git -C "$p" push origin feat/g
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/g
 
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main
