@@ -1,0 +1,1 @@
+../template/scripts/trust-scanner.sh

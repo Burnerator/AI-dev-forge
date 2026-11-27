@@ -1,0 +1,13 @@
+# Maintainers. Every pull request needs an approving review from one of them;
+# branch protection requires Code Owner review, so these paths are covered.
+*                      @chemapolo @fernanzambrano
+
+# The gates: code that runs on every push and in CI. Changes need a regression test.
+/template/.githooks/   @chemapolo @fernanzambrano
+/template/scripts/     @chemapolo @fernanzambrano
+/template/.github/     @chemapolo @fernanzambrano
+/scripts/              @chemapolo @fernanzambrano
+/.githooks/            @chemapolo @fernanzambrano
+/.github/              @chemapolo @fernanzambrano
+/.gitleaks.toml        @chemapolo @fernanzambrano
+/.gitleaksignore       @chemapolo @fernanzambrano

@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  # Pushes to any branch or tag, and pull requests. This is a backstop: a push to
+  # an unprotected branch can skip it ([skip ci]) or remove this file, so it
+  # does not guard every published ref (see docs/enforcement.md, Limits).
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Third-party actions are pinned to a full commit SHA; tags can be moved.
+
+concurrency:
+  # Pull requests: one group per PR, newer runs cancel older ones. Pushes
+  # (branches and tags): a group per run, never cancelled, so every pushed
+  # history is scanned even if a later force-push removes it from the ref.
+  group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0 # full history for gitleaks and the identity check
+          persist-credentials: false # PR-controlled scripts run in this job
+      # actions/checkout rewrites a checked-out tag to point at its commit, so the
+      # annotated tag object (message, tagger) is not in the checkout. Fetch it
+      # first, before any repository code runs in this job, in a step that runs
+      # only git with the token scoped to it.
+      - name: Fetch the pushed tag object
+        if: github.ref_type == 'tag'
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          auth="$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')"
+          git -c "http.extraheader=AUTHORIZATION: basic $auth" \
+            fetch --no-tags origin "+$GITHUB_REF:refs/forge/pushed-tag"
+      - name: Install gitleaks (pinned, checksum verified)
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          # A fresh runner-owned directory, outside the PR-controlled checkout, so
+          # no committed symlink can redirect the download or the extraction.
+          d="$(mktemp -d "$RUNNER_TEMP/gitleaks.XXXXXX")"
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$d/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          (cd "$d" && echo "${GITLEAKS_SHA256}  $f" | sha256sum -c - && tar -xzf "$f" gitleaks)
+          sudo install -m 0755 "$d/gitleaks" /usr/local/bin/gitleaks
+      - name: Secrets gate (history of the commit under test only)
+        run: ./scripts/check_secrets.sh --only HEAD
+      - name: Secrets gate on the pushed tag (message and tagger identity)
+        if: github.ref_type == 'tag'
+        env:
+          # The object the push event reported; the gate fails if the fetched
+          # tag is a different object (the tag moved).
+          PUSHED_OBJECT: ${{ github.event.after }}
+        run: ./scripts/check_secrets.sh --tag refs/forge/pushed-tag "$PUSHED_OBJECT"
+
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false # check.sh is PR-controlled code
+      - name: Install shellcheck and gitleaks (macOS, current Homebrew versions on purpose, see docs/enforcement.md)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck gitleaks
+      - name: Install gitleaks (Linux, pinned, checksum verified)
+        if: runner.os == 'Linux'
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          # A fresh runner-owned directory, outside the PR-controlled checkout, so
+          # no committed symlink can redirect the download or the extraction.
+          d="$(mktemp -d "$RUNNER_TEMP/gitleaks.XXXXXX")"
+          f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o "$d/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          (cd "$d" && echo "${GITLEAKS_SHA256}  $f" | sha256sum -c - && tar -xzf "$f" gitleaks)
+          sudo install -m 0755 "$d/gitleaks" /usr/local/bin/gitleaks
+      - name: Quality gate
+        run: ./scripts/check.sh

@@ -1,0 +1,742 @@
+#!/usr/bin/env bash
+# Integration tests for the installed gates: scripts/check_secrets.sh and the
+# pre-push hook, against throwaway git repositories and a local bare remote.
+# Needs git and gitleaks. Secrets are generated at run time, never stored.
+set -euo pipefail
+# Each case sets bootstrap mode itself; never inherit it (e.g. when this suite
+# runs inside a FORGE_BOOTSTRAP=1 push of the forge).
+unset FORGE_BOOTSTRAP
+# The hook exports this; the replacement fixture needs git's default behaviour.
+unset GIT_NO_REPLACE_OBJECTS GIT_GRAFT_FILE
+forge="$(cd "$(dirname "$0")/.." && pwd -P)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+fails=0
+
+pass() { echo "  ok   $1"; }
+fail() { echo "  FAIL $1${2:+: $2}" >&2; fails=$((fails + 1)); }
+
+# check <description> <command...>: the command must succeed.
+check() {
+  local desc="$1"; shift
+  if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
+}
+# rejects <description> <expected diagnostic (ERE)> <command...>: the command
+# must fail AND print the expected diagnostic, so a crash or an unrelated
+# failure does not count as a pass.
+rejects() {
+  local desc="$1" pattern="$2" out status=0; shift 2
+  out="$("$@" 2>&1)" || status=$?
+  if [[ $status -eq 0 ]]; then fail "$desc" "command succeeded"
+  elif ! grep -qE "$pattern" <<<"$out"; then
+    fail "$desc" "missing diagnostic /$pattern/"
+    tail -n 8 <<<"$out" | sed 's/^/         | /' >&2
+  else pass "$desc"; fi
+}
+# rejects_all <description> <pattern1> <pattern2> <command...>: like rejects, but
+# both diagnostics must appear.
+rejects_all() {
+  local desc="$1" p1="$2" p2="$3" out status=0; shift 3
+  out="$("$@" 2>&1)" || status=$?
+  if [[ $status -eq 0 ]]; then fail "$desc" "command succeeded"
+  elif ! grep -qE "$p1" <<<"$out" || ! grep -qE "$p2" <<<"$out"; then
+    fail "$desc" "missing diagnostic /$p1/ and /$p2/"
+    tail -n 8 <<<"$out" | sed 's/^/         | /' >&2
+  else pass "$desc"; fi
+}
+no_remote_ref() { ! git -C "$1" rev-parse --verify -q "$2" >/dev/null; }
+
+# Bounded read: git ignores SIGPIPE in hooks, so an unbounded `tr </dev/urandom | head`
+# never terminates when this suite runs inside the pre-push hook.
+fake_token() { printf 'ghp_%s' "$(od -An -tx1 -N18 /dev/urandom | tr -d ' \n')"; }
+
+# new_project <dir>: forge-installed repo with a passing check.sh, a noreply
+# identity, the hook enabled, and a bare remote called origin.
+new_project() {
+  local p="$1"
+  mkdir -p "$p"
+  git -C "$p" init -q -b main
+  git -C "$p" config user.name test
+  git -C "$p" config user.email "1+test@users.noreply.github.com"
+  git -C "$p" config commit.gpgsign false
+  "$forge/scripts/install.sh" "$p" >/dev/null
+  printf '#!/usr/bin/env bash\necho "checks ok"\n' > "$p/scripts/check.sh"
+  git -C "$p" config core.hooksPath .githooks
+  git -C "$p" add -A
+  git -C "$p" commit -qm "chore: install forge"
+  # Explicit default branch: runners without init.defaultBranch would point the
+  # bare remote's HEAD at a non-existent master.
+  git init -q --bare -b main "$p.remote.git"
+  git -C "$p" remote add origin "$p.remote.git"
+}
+
+# bootstrap_push <dir> <branch>: first push of the forge, then pin its scanner,
+# as a developer would after reading it.
+bootstrap_push() {
+  FORGE_BOOTSTRAP=1 git -C "$1" push -q origin "$2"
+  git -C "$1" config forge.trustedCommit "$(git -C "$1" rev-parse "$2")"
+}
+
+# fake_lfs_payload <dir>: a clean payload for the all-zero test pointer, so the
+# hook's LFS payload scan can read it.
+fake_lfs_payload() {
+  local d="$1/.git/lfs/objects/00/00"
+  mkdir -p "$d"; echo "clean payload" > "$d/$(printf '%064d' 0)"
+}
+
+secrets() { (cd "$1" && ./scripts/check_secrets.sh "${@:2}"); }
+LEAK='gitleaks found [0-9]+ secret'
+ENV='\.env file\(s\) present'
+
+echo "check_secrets.sh"
+p="$tmp/clean"; new_project "$p"
+check "passes on a clean repo" secrets "$p"
+
+p="$tmp/merge"; new_project "$p"
+echo a > "$p/f"; git -C "$p" add f; git -C "$p" commit -qm a
+git -C "$p" switch -qc side; echo b > "$p/f"; git -C "$p" commit -qam b
+git -C "$p" switch -q main; echo c > "$p/f"; git -C "$p" commit -qam c
+if git -C "$p" merge -q side >/dev/null 2>&1; then fail "fixture: merge should conflict"; fi
+printf 'resolved\ntoken = "%s"\n' "$(fake_token)" > "$p/f"
+git -C "$p" add f; git -C "$p" commit -qm "merge side"
+check "fixture: HEAD is a merge commit with two parents" test "$(git -C "$p" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')" = 3
+check "fixture: the token is not in either parent" test -z "$(git -C "$p" grep -l ghp_ HEAD^1 HEAD^2 -- f)"
+rejects "finds a secret that only exists in a merge commit, and names that commit" "^  $(git -C "$p" rev-parse --short=12 HEAD)$" secrets "$p"
+
+p="$tmp/envroot"; new_project "$p"
+echo "X=1" > "$p/.env.local"; git -C "$p" add -f .env.local; git -C "$p" commit -qm env
+rejects "finds .env.local at the root" "$ENV" secrets "$p"
+
+p="$tmp/envquoted"; new_project "$p"
+mkdir -p "$p/dír con espacio"; echo "X=1" > "$p/dír con espacio/.env"
+git -C "$p" add -f "dír con espacio/.env"; git -C "$p" commit -qm env
+rejects "finds .env in a path git would quote" "$ENV" secrets "$p"
+
+p="$tmp/envrc"; new_project "$p"
+echo "export X=1" > "$p/.envrc"; git -C "$p" add -f .envrc; git -C "$p" commit -qm envrc
+rejects "finds .envrc at the root" "$ENV" secrets "$p"
+p="$tmp/envnested"; new_project "$p"
+mkdir -p "$p/config/deep"; echo "X=1" > "$p/config/deep/.env.production"; echo "export X=1" > "$p/config/.envrc"
+git -C "$p" add -f config; git -C "$p" commit -qm nested
+rejects "finds nested .env.production and .envrc" "2 occurrence" secrets "$p"
+
+p="$tmp/textconv"; new_project "$p"
+echo '*.txt diff=hide' > "$p/.gitattributes"
+git -C "$p" config diff.hide.textconv "sed -e s/ghp_[0-9a-f]*/REDACTED/"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/a.txt"
+git -C "$p" add -A; git -C "$p" commit -qm "add a.txt"
+check "fixture: plain git log -p shows the driver's view, without the token" test -z "$(git -C "$p" log -p | grep ghp_)"
+rejects "scans the stored bytes, not a textconv driver's view" "$LEAK" secrets "$p"
+
+p="$tmp/example"; new_project "$p"
+echo "X=" > "$p/.env.example"; git -C "$p" add .env.example; git -C "$p" commit -qm example
+check "allows .env.example" secrets "$p"
+
+p="$tmp/identity"; new_project "$p"
+echo x > "$p/x"; git -C "$p" add x
+git -C "$p" -c user.email=someone@example.com commit -qm personal
+rejects "rejects a personal commit email" "non-noreply email" secrets "$p"
+
+p="$tmp/badrev"; new_project "$p"
+rejects "rejects an argument that is not a commit" "not a commit" secrets "$p" not-a-commit
+
+p="$tmp/shallow-src"; new_project "$p"
+echo 1 > "$p/a"; git -C "$p" add a; git -C "$p" commit -qm one
+echo 2 > "$p/a"; git -C "$p" commit -qam two
+git clone -q --depth 1 "file://$p" "$tmp/shallow"
+rejects "rejects a shallow clone" "shallow clone" secrets "$tmp/shallow"
+
+p="$tmp/binary"; new_project "$p"
+printf 'a\0b\0\ntoken = "%s"\n' "$(fake_token)" > "$p/blob.dat"
+git -C "$p" add blob.dat; git -C "$p" commit -qm "add binary"
+rejects "finds a secret inside a file git treats as binary" "$LEAK" secrets "$p"
+
+p="$tmp/private"; new_project "$p"
+token="$(fake_token)"
+printf 'token = "%s"\n' "$token" > "$p/secret path name.txt"
+git -C "$p" add -A
+git -C "$p" -c user.name="Private Person" -c user.email=private.person@example.com commit -qm "add config"
+status=0; out="$(secrets "$p" 2>&1)" || status=$?
+check "the gate rejects the commit" test "$status" -ne 0
+check "fixture: the scan did report the finding" grep -qE "$LEAK" <<<"$out"
+check "never prints the token" test -z "$(grep -F "${token:4}" <<<"$out")"
+check "never prints the author's email" test -z "$(grep -i 'private.person@example.com' <<<"$out")"
+check "never prints the author's name" test -z "$(grep -i 'Private Person' <<<"$out")"
+check "never prints the file path" test -z "$(grep -i 'secret path name' <<<"$out")"
+
+p="$tmp/allow-comment"; new_project "$p"
+printf 'token = "%s" # gitleaks:allow\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "allow comment"
+rejects "an inline gitleaks:allow comment does not suppress a finding" "$LEAK" secrets "$p"
+
+p="$tmp/tag-identity"; new_project "$p"
+git -C "$p" -c user.email=someone@example.com tag -a v1 -m "release"
+rejects "rejects an annotated tag with a personal tagger email" "non-noreply email" secrets "$p"
+
+p="$tmp/tag-secret"; new_project "$p"
+git -C "$p" tag -a v1 -m "release notes: token $(fake_token)"
+rejects "finds a secret in an annotated tag message" "annotated tag\(s\) contain secrets" secrets "$p"
+
+p="$tmp/tag-nested"; new_project "$p"
+git -C "$p" -c user.email=someone@example.com tag -a inner -m "inner"
+git -C "$p" tag -a outer -m "outer" inner
+git -C "$p" update-ref -d refs/tags/inner # only the outer tag has a ref
+check "fixture: outer tag points to a tag object" test "$(git -C "$p" cat-file -t "$(git -C "$p" cat-file tag outer | sed -n 's/^object //p')")" = tag
+rejects "follows a tag that points to a tag" "non-noreply email" secrets "$p"
+
+p="$tmp/replace"; new_project "$p"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+leaky="$(git -C "$p" rev-parse HEAD)"
+git -C "$p" rm -q config.txt; git -C "$p" commit -qm "clean"
+clean_tree="$(git -C "$p" rev-parse 'HEAD^{tree}')"
+fake="$(git -C "$p" commit-tree "$clean_tree" -p "$leaky^" -m "add config")"
+git -C "$p" replace "$leaky" "$fake" # local history now shows no secret
+check "fixture: with replacements, git log no longer shows the secret" test -z "$(git -C "$p" log -p --all | grep ghp_)"
+rejects "ignores replacement objects and scans the real history" "$LEAK" secrets "$p"
+
+p="$tmp/tag-explicit"; new_project "$p"
+git -C "$p" -c user.email=someone@example.com tag -a v9 -m "release"
+tagobj="$(git -C "$p" rev-parse v9)"
+git -C "$p" update-ref -d refs/tags/v9 # as in a CI checkout: only what is passed explicitly
+rejects "rejects a tag passed explicitly (CI tag push) with a personal tagger" "non-noreply email" secrets "$p" "$tagobj"
+
+p="$tmp/msg-secret"; new_project "$p"
+echo x > "$p/x"; git -C "$p" add x
+git -C "$p" commit -qm "deploy with token $(fake_token)"
+rejects "finds a secret that only exists in a commit message" "commit messages contain [0-9]+ secret" secrets "$p"
+
+p="$tmp/scope"; new_project "$p"
+git -C "$p" switch -qc unrelated
+echo "X=1" > "$p/.env"; git -C "$p" add -f .env; git -C "$p" commit -qm "env elsewhere"
+git -C "$p" switch -q main
+rejects "default scope sees every local branch" "$ENV" secrets "$p"
+check "--only ignores unrelated branches (CI on a clean commit)" secrets "$p" --only main
+rejects "--only still scans the given history" "$ENV" secrets "$p" --only unrelated
+rejects "--only without revisions is refused" "needs at least one revision" secrets "$p" --only
+
+# A fake gitleaks first in PATH, to prove the gate fails closed.
+fakebin="$tmp/fakebin"; mkdir -p "$fakebin"
+with_fake_scanner() { (cd "$1" && PATH="$fakebin:$PATH" ./scripts/check_secrets.sh); }
+p="$tmp/fake-scanner"; new_project "$p"
+printf '#!/usr/bin/env bash\necho "something broke" >&2\nexit 2\n' > "$fakebin/gitleaks"; chmod +x "$fakebin/gitleaks"
+rejects "fails closed when gitleaks exits with an error" "gitleaks failed to run" with_fake_scanner "$p"
+printf '#!/usr/bin/env bash\necho "0 commits scanned."\nexit 0\n' > "$fakebin/gitleaks"
+rejects "fails closed when gitleaks scans zero commits" "scanned no commits" with_fake_scanner "$p"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/gitleaks"
+rejects "fails closed when gitleaks reports nothing at all" "scanned no commits" with_fake_scanner "$p"
+
+p="$tmp/tag-ci"; new_project "$p"
+git -C "$p" tag -a v1 -m "release"
+pushed="$(git -C "$p" rev-parse v1)"
+check "--tag passes when the tag is the object from the push event" secrets "$p" --tag refs/tags/v1 "$pushed"
+git -C "$p" -c user.email=someone@example.com tag -f -a v1 -m "moved" >/dev/null # tag moved after the push
+rejects "--tag fails when the tag has moved since the push event" "now points to .* not ${pushed:0:12}" secrets "$p" --tag refs/tags/v1 "$pushed"
+rejects "--tag fails when the tag is missing" "not available in this checkout" secrets "$p" --tag refs/tags/nope "$pushed"
+rejects "--tag needs both arguments" "needs <tag-ref> <expected-object-id>" secrets "$p" --tag refs/tags/v1
+
+p="$tmp/env-config"; new_project "$p"
+printf 'title = "permissive"\n' > "$tmp/permissive.toml" # a policy with no rules
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects "ignores GITLEAKS_CONFIG from the environment" "$LEAK" env GITLEAKS_CONFIG="$tmp/permissive.toml" bash "$p/scripts/check_secrets.sh"
+rejects "ignores GITLEAKS_CONFIG_TOML from the environment" "$LEAK" env GITLEAKS_CONFIG_TOML="$(cat "$tmp/permissive.toml")" bash "$p/scripts/check_secrets.sh"
+
+# Root commit: the very first commit of a repository, with log.showRoot=false.
+p="$tmp/root-env"; mkdir -p "$p"; git -C "$p" init -q -b main
+git -C "$p" config user.name test; git -C "$p" config user.email "1+test@users.noreply.github.com"
+git -C "$p" config log.showRoot false
+"$forge/scripts/install.sh" "$p" >/dev/null
+echo "X=1" > "$p/.env"; git -C "$p" add -A; git -C "$p" add -f .env; git -C "$p" commit -qm root
+check "fixture: HEAD is a root commit" test "$(git -C "$p" rev-list --count HEAD)" = 1
+rejects "finds a .env added in the root commit with log.showRoot=false" "$ENV" secrets "$p"
+p="$tmp/root-token"; mkdir -p "$p"; git -C "$p" init -q -b main
+git -C "$p" config user.name test; git -C "$p" config user.email "1+test@users.noreply.github.com"
+git -C "$p" config log.showRoot false
+"$forge/scripts/install.sh" "$p" >/dev/null
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"; git -C "$p" add -A; git -C "$p" commit -qm root
+rejects "finds a token added in the root commit with log.showRoot=false" "$LEAK" secrets "$p"
+
+p="$tmp/tag-headerlike"; new_project "$p"
+git -C "$p" tag -a v2 -m "release notes" -m "tagger Someone <someone@example.com> 0 +0000"
+check "a header-like line in a tag message is not taken as the tagger" secrets "$p"
+
+p="$tmp/policy-extend"; new_project "$p"
+printf '[extend]\nuseDefault = true\npath = "allow.toml"\n' > "$p/.gitleaks.toml"
+rejects "refuses [extend] path in .gitleaks.toml" "uses \\[extend\\] path" secrets "$p"
+printf '[extend]\nuseDefault = true\n' > "$p/.gitleaks.toml"
+check "allows [extend] useDefault alone" secrets "$p"
+i=0
+for variant in '[extend] # comment\npath = "a.toml"' '["extend"]\n"path" = "a.toml"' 'extend.path = "a.toml"' 'extend = { path = "a.toml" }' '[ extend ]\n  path="a.toml"'; do
+  i=$((i + 1))
+  printf '%b\n' "$variant" > "$p/.gitleaks.toml"
+  rejects "refuses extend.path written another way (#$i)" "uses \\[extend\\] path" secrets "$p"
+done
+printf 'not = [valid toml\n' > "$p/.gitleaks.toml"
+rejects "refuses an invalid .gitleaks.toml" "not valid TOML" secrets "$p"
+printf '[extend]\nuseDefault = true\n' > "$p/.gitleaks.toml"
+nopy="$tmp/nopy"; mkdir -p "$nopy"
+for t in git bash env sh mktemp rm cat sed awk grep od tr head sort cut wc dirname basename find gitleaks printf; do w="$(command -v "$t" || true)"; [[ -n "$w" && "$w" == /* ]] && ln -sf "$w" "$nopy/$t"; done
+rejects "fails closed without a TOML parser" "needs Python 3.11" env PATH="$nopy" bash "$p/scripts/check_secrets.sh"
+
+p="$tmp/policy-link"; new_project "$p"
+echo 'title = "x"' > "$p/policy.toml"; ln -s policy.toml "$p/.gitleaks.toml"
+rejects "refuses a symlinked .gitleaks.toml" "must be regular files" secrets "$p"
+
+p="$tmp/grafts"; new_project "$p"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+git -C "$p" rm -q config.txt; git -C "$p" commit -qm "remove config"
+git -C "$p" rev-parse HEAD > "$p/.git/info/grafts" # HEAD now looks like a root commit
+check "fixture: with the graft, git log hides the secret commit" test "$(git -C "$p" log --oneline 2>/dev/null | wc -l | tr -d ' ')" = 1
+rejects "ignores legacy grafts and scans the real ancestry" "$LEAK" secrets "$p"
+
+echo "pre-push hook"
+p="$tmp/push-ok"; new_project "$p"
+rejects "refuses a first push without explicit bootstrap" "no trusted scanner pinned" git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+check "allows a clean first push with FORGE_BOOTSTRAP=1" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "the push reached the remote" git -C "$p.remote.git" rev-parse --verify -q refs/heads/main
+
+p="$tmp/push-fail"; new_project "$p"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$p/scripts/check.sh"
+git -C "$p" commit -qam "break checks"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check.sh" # passing, but uncommitted
+rejects "blocks when the pushed tree fails check.sh (ignores the working tree)" "checks failed for refs/heads/main" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+
+p="$tmp/push-secret"; new_project "$p"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects "blocks a first push that contains a secret" "secrets gate failed" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+
+p="$tmp/push-orphan"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" switch -q --detach
+echo "X=1" > "$p/.env"; git -C "$p" add -f .env; git -C "$p" commit -qm "env on detached HEAD"
+orphan="$(git -C "$p" rev-parse HEAD)"
+git -C "$p" switch -q main # no ref points to the commit any more
+rejects "blocks pushing by SHA a commit that no ref points to" "secrets gate failed" git -C "$p" push origin "$orphan:refs/heads/sneaky"
+check "the unreferenced commit did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/sneaky
+
+p="$tmp/push-wc-scanner"; new_project "$p"
+bootstrap_push "$p" main
+printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh" # weakened, uncommitted
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects "ignores a weakened scanner in the working copy" "secrets gate failed" git -C "$p" push origin main
+check "the secret did not reach the remote" test "$(git -C "$p.remote.git" rev-parse main)" != "$(git -C "$p" rev-parse main)"
+
+p="$tmp/push-committed-scanner"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" switch -qc feat/weaken
+printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add -A; git -C "$p" commit -qm "weaken scanner and add config"
+rejects "uses the default branch's scanner, not one committed on the branch" "secrets gate failed" git -C "$p" push origin feat/weaken
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/weaken
+
+p="$tmp/push-unset"; new_project "$p"
+git -C "$p" config forge.trustedCommit refs/remotes/origin/main
+rejects "refuses a pin that is a ref name, not a commit ID" "must be a full commit ID" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+
+p="$tmp/push-trunk"; new_project "$p"
+git -C "$p" branch -m main trunk
+bootstrap_push "$p" trunk
+git -C "$p" switch -qc feat/x
+printf '#!/usr/bin/env bash\nexit 0\n' > "$p/scripts/check_secrets.sh"
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add -A; git -C "$p" commit -qm "weaken scanner and add config"
+rejects_all "uses the pinned scanner (trunk), and it finds the secret" "scanner from pinned commit $(git -C "$p" rev-parse --short=12 trunk)" "$LEAK" git -C "$p" push origin feat/x
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/x
+
+p="$tmp/push-ignorefile"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" switch -qc feat/ignore
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+echo "$(git -C "$p" rev-parse HEAD):config.txt:github-pat:1" > "$p/.gitleaksignore"
+git -C "$p" add .gitleaksignore; git -C "$p" commit -qm "ignore it"
+check "fixture: the branch's ignore file would silence the finding" secrets "$p"
+rejects_all "a .gitleaksignore committed on the branch does not silence the trusted scan" "scanner from pinned commit" "$LEAK" git -C "$p" push origin feat/ignore
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/ignore
+
+p="$tmp/push-dest"; new_project "$p"
+bootstrap_push "$p" main
+# A second, non-empty destination whose default branch carries a hostile scanner.
+evil="$tmp/push-dest.evil"; marker="$tmp/push-dest.ran"
+git clone -q "$p.remote.git" "$evil"
+git -C "$evil" config user.email "1+e@users.noreply.github.com"; git -C "$evil" config user.name e
+printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$marker" > "$evil/scripts/check_secrets.sh"
+git -C "$evil" commit -qam "hostile scanner"
+git init -q --bare -b main "$evil.git"; git -C "$evil" push -q --no-verify "$evil.git" main
+git -C "$p" config remote.origin.pushurl "$evil.git"
+# Build on the destination's history so the push is a fast-forward and the hook
+# really runs; the hostile scanner is then even part of the pushed commits.
+git -C "$p" fetch -q "$evil.git" main
+git -C "$p" reset -q --hard FETCH_HEAD
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects_all "never runs code from the push destination" "scanner from pinned commit" "$LEAK" git -C "$p" push origin main
+check "the destination's scanner never ran" test ! -e "$marker"
+
+p="$tmp/push-nocheckout"; new_project "$p"
+bootstrap_push "$p" main
+echo z > "$p/z"; git -C "$p" add z; git -C "$p" commit -qm "more"
+status=0; out="$(TMPDIR="$tmp/does-not-exist" git -C "$p" push origin main 2>&1)" || status=$?
+check "stops when it cannot create a clean checkout" test "$status" -ne 0
+check "says so" grep -q "cannot create a clean checkout" <<<"$out"
+check "no gate ran on an incomplete checkout" test -z "$(grep -E 'checks ok|==> ' <<<"$out")"
+
+p="$tmp/push-postcheckout"; new_project "$p"
+marker="$tmp/post-checkout.ran"
+printf '#!/usr/bin/env bash\ntouch "%s"\n' "$marker" > "$p/.githooks/post-checkout"; chmod +x "$p/.githooks/post-checkout"
+git -C "$p" add .githooks/post-checkout; git -C "$p" commit -qm "add post-checkout hook"
+rm -f "$marker"
+check "push with a post-checkout hook in the project" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "the project's post-checkout hook never ran during the gates" test ! -e "$marker"
+
+p="$tmp/push-legacy"; new_project "$p"
+marker="$tmp/legacy.ran"
+printf '#!/usr/bin/env bash\ncat > "%s"\n' "$marker" > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks/pre-push"
+check "push with a previous pre-push hook in .git/hooks" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "the previous hook ran after the gates" test -f "$marker"
+check "it received the same refs on stdin" grep -q "refs/heads/main $(git -C "$p" rev-parse main)" "$marker"
+p="$tmp/push-legacy-fail"; new_project "$p"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks/pre-push"
+rejects "a failing previous hook still blocks the push" "previous pre-push hook failed" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+
+lfsbin="$tmp/lfsbin"; mkdir -p "$lfsbin"; lfsmark="$tmp/lfs.ran"
+printf '#!/usr/bin/env bash\necho "$*" > "%s"; cat >> "%s"\n' "$lfsmark" "$lfsmark" > "$lfsbin/git-lfs"; chmod +x "$lfsbin/git-lfs"
+p="$tmp/push-lfs"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"; git -C "$p" add .gitattributes; git -C "$p" commit -qm "use lfs"
+check "push in an LFS repository" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "git lfs pre-push ran with the remote and the refs" grep -q "^pre-push origin" "$lfsmark"
+check "git lfs pre-push received the pushed refs" grep -q "refs/heads/main $(git -C "$p" rev-parse main)" "$lfsmark"
+p="$tmp/push-lfs-missing"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"; git -C "$p" add .gitattributes; git -C "$p" commit -qm "use lfs"
+nolfs="$tmp/nolfs"; mkdir -p "$nolfs"; for t in git bash env sh mktemp rm cat sed awk grep od tr head sort cut wc dirname basename find gitleaks printf; do w="$(command -v "$t" || true)"; [[ -n "$w" && "$w" == /* ]] && ln -sf "$w" "$nolfs/$t"; done
+rejects "refuses an LFS push when git-lfs is missing" "git-lfs is not installed" env PATH="$nolfs" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+
+if git init -q --object-format=sha256 "$tmp/sha256-probe" 2>/dev/null; then
+  p="$tmp/push-sha256"; mkdir -p "$p"; git -C "$p" init -q --object-format=sha256 -b main
+  git -C "$p" config user.name test; git -C "$p" config user.email "1+test@users.noreply.github.com"
+  "$forge/scripts/install.sh" "$p" >/dev/null
+  printf '#!/usr/bin/env bash\necho "checks ok"\n' > "$p/scripts/check.sh"
+  git -C "$p" add -A; git -C "$p" commit -qm init
+  git init -q --bare --object-format=sha256 -b main "$p.remote.git"
+  git -C "$p" remote add origin "$p.remote.git"
+  git -C "$p" push -q origin main:refs/heads/old # setup only, before enabling the hook
+  git -C "$p" config core.hooksPath .githooks
+  check "allows deleting a branch in a SHA-256 repository" git -C "$p" push -q origin :refs/heads/old
+  check "the branch was deleted" no_remote_ref "$p.remote.git" refs/heads/old
+else
+  echo "  skip SHA-256 deletion (git without --object-format=sha256)"
+fi
+
+p="$tmp/push-customhooks"; new_project "$p"
+mkdir -p "$p/.husky"; marker="$tmp/custom.ran"
+printf '#!/usr/bin/env bash\ncat > "%s"\n' "$marker" > "$p/.husky/pre-push"; chmod +x "$p/.husky/pre-push"
+git -C "$p" config forge.previousHook .husky/pre-push # recorded before switching core.hooksPath
+check "push with a custom previous hooks path" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+check "the previous custom pre-push hook ran" grep -q "refs/heads/main" "$marker"
+p="$tmp/push-badprevious"; new_project "$p"
+git -C "$p" config forge.previousHook .husky/missing
+rejects "refuses a forge.previousHook that is not executable" "is not an executable file" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+
+p="$tmp/push-lfs-branch"; new_project "$p"
+git -C "$p" switch -qc lfs-branch
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"; git -C "$p" add .gitattributes; git -C "$p" commit -qm "use lfs"
+git -C "$p" switch -q main # the checkout does not use LFS
+rm -f "$lfsmark"
+check "push an LFS branch from a non-LFS checkout" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin lfs-branch
+check "git lfs pre-push ran for the pushed LFS branch" grep -q "refs/heads/lfs-branch" "$lfsmark"
+
+if command -v git-lfs >/dev/null 2>&1; then
+  # Real LFS: the object must be downloadable from the destination afterwards,
+  # with an unrelated previous hook present (both must run).
+  p="$tmp/push-lfs-real"; new_project "$p"
+  git -C "$p" lfs install --local --skip-repo >/dev/null
+  marker="$tmp/lfs-real-legacy.ran"
+  printf '#!/usr/bin/env bash\ntouch "%s"\n' "$marker" > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks/pre-push"
+  (cd "$p" && git lfs track "*.bin" >/dev/null)
+  printf 'real-lfs-payload-%s\n' "$(od -An -tx1 -N8 /dev/urandom | tr -d ' \n')" > "$p/big.bin"
+  payload="$(cat "$p/big.bin")"
+  git -C "$p" add .gitattributes big.bin; git -C "$p" commit -qm "add an LFS object"
+  check "fixture: git stores a pointer, not the payload" grep -q '^version https://git-lfs' <(git -C "$p" cat-file -p HEAD:big.bin)
+  check "push with LFS and an unrelated previous hook" env FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main
+  check "the unrelated previous hook ran" test -f "$marker"
+  q="$tmp/push-lfs-real.clone"
+  git -c filter.lfs.smudge="git-lfs smudge -- %f" -c filter.lfs.process="git-lfs filter-process" -c filter.lfs.required=true clone -q "$p.remote.git" "$q" 2>/dev/null || true
+  (cd "$q" && git lfs install --local --skip-repo >/dev/null && git lfs pull >/dev/null 2>&1) || true
+  check "a fresh clone gets the real LFS object from the destination" test "$(cat "$q/big.bin" 2>/dev/null)" = "$payload"
+else
+  echo "  skip real LFS round trip (git-lfs not installed)"
+fi
+
+p="$tmp/push-filter"; new_project "$p"
+# The pinned commit itself carries an attribute that selects a filter the
+# developer has configured locally; the filter would swap the scanner for a stub.
+marker="$tmp/smudge.ran"
+echo 'scripts/check_secrets.sh filter=evil' > "$p/.gitattributes"
+git -C "$p" add .gitattributes; git -C "$p" commit -qm "attribute on the scanner"
+git -C "$p" config filter.evil.smudge "sh -c 'cat >/dev/null; touch $marker; printf \"#!/usr/bin/env bash\\nexit 0\\n\"'"
+git -C "$p" config filter.evil.clean cat
+bootstrap_push "$p" main
+git -C "$p" switch -qc feat/filter
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add -A; git -C "$p" commit -qm "add config"
+rm -f "$marker"
+rejects_all "a filter selected by committed attributes cannot swap the pinned scanner" "scanner from pinned commit" "$LEAK" git -C "$p" push origin feat/filter
+check "no smudge filter ran during the gates" test ! -e "$marker"
+
+p="$tmp/push-lfs-second"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"; fake_lfs_payload "$p"
+git -C "$p" add -A; git -C "$p" commit -qm "lfs pointer in an ancestor"
+PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main # origin now has the LFS history
+git -C "$p" config forge.trustedCommit "$(git -C "$p" rev-parse main)"
+git -C "$p" rm -q .gitattributes; git -C "$p" commit -qm "attributes removed"
+PATH="$lfsbin:$PATH" git -C "$p" push -q origin main # origin has the whole LFS history
+echo more > "$p/notes.txt"; git -C "$p" add notes.txt; git -C "$p" commit -qm "unrelated tip"
+git init -q --bare -b main "$p.second.git"; git -C "$p" remote add second "$p.second.git"
+rm -f "$lfsmark"
+check "push to a second remote" env PATH="$lfsbin:$PATH" git -C "$p" push -q second main
+check "git lfs pre-push ran for history the second remote lacks" grep -q "^pre-push second" "$lfsmark"
+
+p="$tmp/push-lfs-pushurl"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"; fake_lfs_payload "$p"
+git -C "$p" add -A; git -C "$p" commit -qm "lfs pointer in an ancestor"
+git -C "$p" rm -q .gitattributes; git -C "$p" commit -qm "attributes removed"
+PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main # the fetch URL has it all
+git -C "$p" config forge.trustedCommit "$(git -C "$p" rev-parse main)"
+echo more > "$p/notes.txt"; git -C "$p" add notes.txt; git -C "$p" commit -qm "unrelated tip"
+git init -q --bare -b main "$p.push.git"
+git -C "$p" config remote.origin.pushurl "$p.push.git" # pushes go elsewhere
+rm -f "$lfsmark"
+check "push to a pushurl different from the fetch URL" env PATH="$lfsbin:$PATH" git -C "$p" push -q origin main
+check "git lfs pre-push ran despite tracking refs for the fetch URL" grep -q "refs/heads/main" "$lfsmark"
+
+p="$tmp/push-tag-oid"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" -c user.email=someone@example.com tag -a vx -m "release"
+tagobj="$(git -C "$p" rev-parse vx)"
+git -C "$p" update-ref -d refs/tags/vx # no local ref points to the tag object any more
+check "fixture: no local tag ref" test -z "$(git -C "$p" for-each-ref refs/tags)"
+rejects "blocks an annotated tag pushed by object ID with a personal tagger" "non-noreply email" git -C "$p" push origin "$tagobj:refs/tags/vx"
+check "the tag did not reach the remote" no_remote_ref "$p.remote.git" refs/tags/vx
+
+p="$tmp/push-grafts"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" switch -qc feat/g
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+git -C "$p" rm -q config.txt; git -C "$p" commit -qm "remove config"
+echo "$(git -C "$p" rev-parse HEAD) $(git -C "$p" rev-parse main)" > "$p/.git/info/grafts" # skip the secret commit
+rejects "the hook ignores grafts that hide a pushed secret" "$LEAK" git -C "$p" push origin feat/g
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/g
+
+p="$tmp/push-lfs-missing-payload"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 1 > "$p/a.bin"
+git -C "$p" add -A; git -C "$p" commit -qm "pointer without a local payload"
+rejects "fails closed when an LFS payload cannot be inspected" "cannot inspect 1 LFS object" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+
+if command -v git-lfs >/dev/null 2>&1; then
+  p="$tmp/push-lfs-secret"; new_project "$p"
+  git -C "$p" lfs install --local --skip-repo >/dev/null
+  (cd "$p" && git lfs track "*.txt" >/dev/null)
+  printf 'token = "%s"\n' "$(fake_token)" > "$p/notes.txt"
+  git -C "$p" add .gitattributes notes.txt; git -C "$p" commit -qm "secret inside an LFS object"
+  check "fixture: git stores only a pointer for the secret file" grep -q '^version https://git-lfs' <(git -C "$p" cat-file -p HEAD:notes.txt)
+  rejects "scans LFS payloads before upload and blocks a secret inside one" "LFS payload\\(s\\) contain secrets" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+  check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/main
+  check "no LFS object was uploaded" test -z "$(find "$p.remote.git" -path '*lfs/objects*' -type f 2>/dev/null)"
+else
+  echo "  skip LFS payload secret (git-lfs not installed)"
+fi
+
+# lfs_object <dir> <file> <payload> <pointer-style>: store <payload> in local LFS
+# storage and commit <file> as a pointer to it (canonical, ext or legacy).
+lfs_object() {
+  local p="$1" file="$2" payload="$3" style="$4" oid size d
+  oid="$(printf '%s' "$payload" | shasum -a 256 | cut -d' ' -f1)"; size="${#payload}"
+  d="$p/.git/lfs/objects/${oid:0:2}/${oid:2:2}"; mkdir -p "$d"; printf '%s' "$payload" > "$d/$oid"
+  case "$style" in
+    canonical) printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$size" ;;
+    ext) printf 'version https://git-lfs.github.com/spec/v1\next-0-foo sha256:%064d\noid sha256:%s\nsize %s\n' 7 "$oid" "$size" ;;
+    legacy) printf 'version https://hawser.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$size" ;;
+    crlf) printf 'version https://git-lfs.github.com/spec/v1\r\noid sha256:%s\r\nsize %s\r\n' "$oid" "$size" ;;
+  esac > "$p/$file"
+  echo "$file filter=lfs diff=lfs merge=lfs -text" >> "$p/.gitattributes"
+  git -C "$p" add .gitattributes "$file"; git -C "$p" commit -qm "lfs $style"
+}
+for style in ext legacy crlf; do
+  p="$tmp/push-lfs-$style"; new_project "$p"
+  lfs_object "$p" "data.txt" "token = \"$(fake_token)\"" "$style"
+  rejects "scans the payload of an LFS pointer with $style syntax" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+  check "nothing reached the remote ($style pointer)" no_remote_ref "$p.remote.git" refs/heads/main
+done
+p="$tmp/push-lfs-wt-ignore"; new_project "$p"
+payload="token = \"$(fake_token)\""
+lfs_object "$p" "data.txt" "$payload" canonical
+oid="$(printf '%s' "$payload" | shasum -a 256 | cut -d' ' -f1)"
+printf '%s:github-pat:1\n%s:generic-api-key:1\n' "$oid" "$oid" > "$p/.gitleaksignore" # working tree only, not committed
+rejects "a working-tree .gitleaksignore cannot suppress an LFS payload finding" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+
+p="$tmp/push-old-git"; new_project "$p"
+oldgit="$tmp/oldgit"; mkdir -p "$oldgit"; realgit="$(command -v git)"
+cat > "$oldgit/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == version ]]; then echo "git version 2.39.5"; exit 0; fi
+exec "$realgit" "\$@"
+EOF
+chmod +x "$oldgit/git"
+# git prepends its exec-path to PATH for hooks, so call the hook directly, as
+# git would, with the shim first on PATH.
+old_git_hook() { (cd "$1" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$(git rev-parse main)" 0 \
+  | env PATH="$oldgit:$PATH" FORGE_BOOTSTRAP=1 bash .githooks/pre-push origin "$1.remote.git"); }
+rejects "refuses to run with git older than 2.40" "git 2.40 or newer is required" old_git_hook "$p"
+
+p="$tmp/push-lfs-allow"; new_project "$p"
+lfs_object "$p" "data.txt" "token = \"$(fake_token)\" # gitleaks:allow" canonical
+rejects "an inline gitleaks:allow inside an LFS payload does not suppress the finding" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote (allow marker in LFS)" no_remote_ref "$p.remote.git" refs/heads/main
+
+p="$tmp/push-msg"; new_project "$p"
+bootstrap_push "$p" main
+echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"
+rejects "blocks a push whose only secret is in a commit message" "commit messages contain" git -C "$p" push origin main
+check "the commit did not reach the remote" test "$(git -C "$p.remote.git" rev-parse main)" != "$(git -C "$p" rev-parse main)"
+
+p="$tmp/push-tag"; new_project "$p"
+bootstrap_push "$p" main
+git -C "$p" -c user.email=someone@example.com tag -a v1 -m "release"
+rejects "blocks pushing an annotated tag with a personal tagger email" "non-noreply email" git -C "$p" push origin v1
+check "the tag did not reach the remote" no_remote_ref "$p.remote.git" refs/tags/v1
+
+p="$tmp/push-pin"; new_project "$p"
+bootstrap_push "$p" main
+pinned="$(git -C "$p" rev-parse main)"
+other="$tmp/push-pin.other"; git clone -q "$p.remote.git" "$other"
+git -C "$other" config user.email "1+o@users.noreply.github.com"; git -C "$other" config user.name o
+printf '#!/usr/bin/env bash\nexit 0\n' > "$other/scripts/check_secrets.sh"
+git -C "$other" commit -qam "unreviewed scanner on main"
+git -C "$other" push -q --no-verify origin main
+git -C "$p" fetch -q origin # origin/main now carries the unreviewed scanner
+check "fixture: origin/main moved past the pin" test "$(git -C "$p" rev-parse origin/main)" != "$pinned"
+git -C "$p" switch -qc feat/z
+printf 'token = "%s"\n' "$(fake_token)" > "$p/config.txt"
+git -C "$p" add config.txt; git -C "$p" commit -qm "add config"
+rejects_all "a fetch does not move the trusted scanner: the pin still runs" "scanner from pinned commit ${pinned:0:12}" "$LEAK" git -C "$p" push origin feat/z
+check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/z
+
+echo "trust-scanner.sh"
+p="$tmp/trust"; new_project "$p"
+first="$(git -C "$p" rev-parse HEAD)"
+trust() { (cd "$1" && ./scripts/trust-scanner.sh "${@:2}"); }
+trust_no() { (cd "$1" && echo n | ./scripts/trust-scanner.sh "${@:2}"); }
+rejects "refuses something that is not a commit" "not a commit" trust "$p" --yes nope
+git -C "$p" commit -q --allow-empty -m "second"
+printf 'x\n' > "$p/README"; git -C "$p" add README; git -C "$p" commit -qm third
+check "pins a commit with --yes" trust "$p" --yes "$first"
+check "stores the full commit ID" test "$(git -C "$p" config forge.trustedCommit)" = "$first"
+printf '\n# reviewed change\n' >> "$p/scripts/check_secrets.sh"; git -C "$p" commit -qam "scanner change"
+out="$(trust "$p" --yes HEAD)"
+check "shows the scanner diff before re-pinning" grep -q '+# reviewed change' <<<"$out"
+check "re-pins to the new commit" test "$(git -C "$p" config forge.trustedCommit)" = "$(git -C "$p" rev-parse HEAD)"
+rejects "asks before re-pinning and keeps the pin on no" "Not changed" trust_no "$p" "$first"
+check "pin unchanged after answering no" test "$(git -C "$p" config forge.trustedCommit)" = "$(git -C "$p" rev-parse HEAD)"
+p="$tmp/trust-link"; new_project "$p"
+mkdir -p "$p/vendor"; git -C "$p" mv scripts/check_secrets.sh vendor/check_secrets.sh
+ln -s ../vendor/check_secrets.sh "$p/scripts/check_secrets.sh"; git -C "$p" add -A; git -C "$p" commit -qm "scanner behind a link"
+trust "$p" --yes HEAD >/dev/null
+printf '\n# change only in the link target\n' >> "$p/vendor/check_secrets.sh"; git -C "$p" commit -qam "edit target"
+out="$(trust "$p" --yes HEAD)"
+check "a change confined to a symlink target shows in the pin diff" grep -q '+# change only in the link target' <<<"$out"
+git -C "$p" config --unset forge.trustedCommit
+out="$(trust "$p" --yes HEAD)"
+check "the first pin prints the full scanner, following links" grep -q '# change only in the link target' <<<"$out"
+
+p="$tmp/trust-dirlink"; new_project "$p"
+mkdir -p "$p/real/bin"; git -C "$p" mv scripts/check_secrets.sh real/bin/check_secrets.sh
+ln -s real/bin "$p/linkdir"; ln -s ../linkdir/check_secrets.sh "$p/scripts/check_secrets.sh"
+git -C "$p" add -A; git -C "$p" commit -qm "scanner behind a linked directory"
+trust "$p" --yes HEAD >/dev/null
+printf '\n# edit behind a linked directory\n' >> "$p/real/bin/check_secrets.sh"; git -C "$p" commit -qam "edit"
+out="$(trust "$p" --yes HEAD)"
+check "follows a link through a linked directory and shows the real change" grep -q '+# edit behind a linked directory' <<<"$out"
+
+p="$tmp/trust-dirlink-out"; new_project "$p"
+trust "$p" --yes HEAD >/dev/null; good="$(git -C "$p" config forge.trustedCommit)"
+ln -s ../../.. "$p/up"; rm "$p/scripts/check_secrets.sh"; ln -s ../up/outside.sh "$p/scripts/check_secrets.sh"
+git -C "$p" add -A; git -C "$p" commit -qm "escape through a linked directory"
+rejects "refuses an escape through a linked directory" "outside the repository|not tracked" trust "$p" --yes HEAD
+check "the pin is untouched (directory escape)" test "$(git -C "$p" config forge.trustedCommit)" = "$good"
+
+p="$tmp/trust-noexec"; new_project "$p"
+chmod -x "$p/scripts/check_secrets.sh"; git -C "$p" add -A; git -C "$p" commit -qm "not executable"
+rejects "refuses a scanner that is not a tracked executable" "tracked executable" trust "$p" --yes HEAD
+
+p="$tmp/trust-binary"; new_project "$p"
+trust "$p" --yes HEAD >/dev/null
+echo 'scripts/check_secrets.sh binary diff=hide' > "$p/.gitattributes"
+git -C "$p" config diff.hide.textconv "sed -e /hidden-change/d"
+printf '\n# hidden-change\n' >> "$p/scripts/check_secrets.sh"
+git -C "$p" add -A; git -C "$p" commit -qm "scanner marked binary with a textconv"
+check "fixture: plain git diff hides the change" test -z "$(git -C "$p" diff HEAD~1 HEAD -- scripts/check_secrets.sh | grep '^+.*hidden-change')"
+out="$(trust "$p" --yes HEAD)"
+check "the pin diff shows the literal change despite binary/textconv" grep -q '^+# hidden-change' <<<"$out"
+
+p="$tmp/trust-extend"; new_project "$p"
+trust "$p" --yes HEAD >/dev/null; good="$(git -C "$p" config forge.trustedCommit)"
+printf '[extend]\npath = "allow.toml"\n' > "$p/.gitleaks.toml"; echo 'title="a"' > "$p/allow.toml"
+git -C "$p" add -A; git -C "$p" commit -qm "policy via extend path"
+rejects "refuses to pin a policy with [extend] path" "uses \\[extend\\] path" trust "$p" --yes HEAD
+check "the pin is untouched ([extend] path)" test "$(git -C "$p" config forge.trustedCommit)" = "$good"
+
+for kind in absolute escaping; do
+  p="$tmp/trust-bad-$kind"; new_project "$p"
+  trust "$p" --yes HEAD >/dev/null
+  good="$(git -C "$p" config forge.trustedCommit)"
+  if [[ $kind == absolute ]]; then target="$tmp/elsewhere-scanner.sh"; else target="../../../outside.sh"; fi
+  rm "$p/scripts/check_secrets.sh"; ln -s "$target" "$p/scripts/check_secrets.sh"
+  git -C "$p" add -A; git -C "$p" commit -qm "scanner links outside ($kind)"
+  rejects "refuses a scanner link that leaves the repository ($kind)" "links outside the repository" trust "$p" --yes HEAD
+  check "the existing pin is untouched ($kind)" test "$(git -C "$p" config forge.trustedCommit)" = "$good"
+done
+
+q="$tmp/trust-noscanner"; mkdir -p "$q"; git -C "$q" init -q -b main
+git -C "$q" config user.name t; git -C "$q" config user.email "1+t@users.noreply.github.com"
+git -C "$q" commit -q --allow-empty -m empty
+"$forge/scripts/install.sh" "$q" >/dev/null
+rejects "refuses a commit without a scanner" "has no scripts/check_secrets.sh" trust "$q" --yes HEAD
+
+echo "tests/e2e/github-tags.sh guards (local, no network)"
+e2e="$forge/tests/e2e/github-tags.sh"
+bare="$tmp/e2e-target.git"; git init -q --bare -b main "$bare"
+lsfail="$tmp/lsfail"; mkdir -p "$lsfail"; realgit="$(command -v git)"
+cat > "$lsfail/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == ls-remote ]]; then exit 128; fi
+exec "$realgit" "\$@"
+EOF
+chmod +x "$lsfail/git"
+rejects "e2e: a failed ls-remote is not taken as an empty repository" "cannot list the refs" env PATH="$lsfail:$PATH" FORGE_E2E_REMOTE_URL="$bare" bash "$e2e" owner/repo
+check "e2e: nothing was pushed after the failed lookup" test -z "$(git -C "$bare" for-each-ref)"
+other="$tmp/e2e-nonempty"; git init -q -b main "$other"; git -C "$other" -c user.email=1+t@users.noreply.github.com -c user.name=t commit -q --allow-empty -m x
+git init -q --bare -b main "$tmp/e2e-nonempty.git"; git -C "$other" push -q "$tmp/e2e-nonempty.git" main
+before="$(git -C "$tmp/e2e-nonempty.git" for-each-ref)"
+rejects "e2e: refuses a non-empty repository" "is not empty" env FORGE_E2E_REMOTE_URL="$tmp/e2e-nonempty.git" bash "$e2e" owner/repo
+check "e2e: the non-empty repository is untouched" test "$(git -C "$tmp/e2e-nonempty.git" for-each-ref)" = "$before"
+
+if [[ $fails -ne 0 ]]; then
+  echo "$fails test(s) failed" >&2
+  exit 1
+fi
+echo "all gate tests passed"

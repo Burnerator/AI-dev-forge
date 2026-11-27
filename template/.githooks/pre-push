@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# Blocks the push unless the commits being pushed pass the gates.
+#
+# 1) Secrets gate over all local refs PLUS every pushed ref tip and its history
+#    (even a commit that no local ref points to). The scanner is never taken
+#    from the working copy, the pushed commits or the push destination. It is
+#    the committed scripts/check_secrets.sh (and .gitleaks.toml/.gitleaksignore)
+#    of a commit you pinned after reviewing it, once per clone and again
+#    whenever you accept a new scanner version:
+#        scripts/trust-scanner.sh refs/remotes/origin/main
+#    (it shows the scanner diff and stores the commit ID in forge.trustedCommit).
+#    A pin does not move on fetch. Unset: the push is refused. If nothing is
+#    pinned yet or the pinned commit has no scanner (the push that introduces
+#    the forge), the push is refused unless run as FORGE_BOOTSTRAP=1 git push ...,
+#    which scans with each pushed tip's own scanner.
+# 2) Quality gate: each pushed ref tip is checked out in a clean temporary
+#    worktree (no .env, no uncommitted changes) and runs its own scripts/check.sh,
+#    so what is tested is what is published. Intermediate commits of a push
+#    are not run individually; CI tests every pushed tip too.
+#    That check.sh is code from the pushed commit, run with your privileges and
+#    environment, exactly like running the project's tests yourself: only push
+#    commits whose code you have read.
+#
+# Trust boundary: this is a guard against mistakes by the person pushing, not
+# against that person (git push --no-verify skips it). CI and branch protection
+# are the controls that do not depend on the client.
+#
+# Enable once per clone: git config core.hooksPath .githooks
+set -euo pipefail
+# Scan and check the objects git actually transfers, never replacement objects.
+export GIT_NO_REPLACE_OBJECTS=1
+# Legacy grafts (.git/info/grafts) could rewrite the ancestry the scans walk
+# while a push still sends the real history: ignore them.
+export GIT_GRAFT_FILE=/nonexistent/forge-ignores-grafts # a path that never exists; /dev/null would count as a graft file
+repo_root="$(git rev-parse --show-toplevel)"
+
+# git >= 2.40 is required (--attr-source for filter-free checkouts).
+git_version="$(git version | sed -n 's/^git version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')"
+read -r git_major git_minor <<<"${git_version:-0 0}"
+if [[ $git_major -lt 2 || ( $git_major -eq 2 && $git_minor -lt 40 ) ]]; then
+  echo "pre-push: git 2.40 or newer is required (found: $(git version)); push aborted." >&2
+  exit 1
+fi
+
+worktrees=()
+cleanup() {
+  local wt
+  for wt in ${worktrees[@]+"${worktrees[@]}"}; do
+    git -C "$repo_root" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+  done
+}
+trap cleanup EXIT
+
+# checkout <commit>: clean detached worktree of <commit>; prints its path.
+# Called in $(...), where errexit does not apply, so every step is checked.
+empty_tree="$(git -C "$repo_root" hash-object -t tree /dev/null)"
+checkout() {
+  local wt
+  wt="$(mktemp -d "${TMPDIR:-/tmp}/prepush.XXXXXX")" || return 1
+  # Raw bytes only: hooks off (no post-checkout running pushed code before the
+  # gates), and attributes read from the empty tree with no attributes file,
+  # so no committed .gitattributes can select a smudge/process filter or eol
+  # conversion that changes what runs. Needs git >= 2.40 (--attr-source).
+  if ! git -C "$repo_root" -c core.hooksPath=/dev/null -c core.attributesFile=/dev/null \
+    --attr-source="$empty_tree" worktree add --quiet --detach "$wt" "$1" >&2; then
+    rm -rf "$wt"
+    return 1
+  fi
+  printf '%s\n' "$wt"
+}
+# verify_raw <worktree> <commit>: the scanner and policy files in the checkout
+# (links followed) must be byte-identical to the committed blobs.
+verify_raw() {
+  local wt="$1" commit="$2" f real rel want have
+  for f in scripts/check_secrets.sh .gitleaks.toml .gitleaksignore; do
+    [[ -e "$wt/$f" ]] || continue
+    real="$(realpath "$wt/$f")" || return 1
+    rel="${real#"$(realpath "$wt")"/}"
+    [[ "$rel" == "$real" ]] && return 1 # resolves outside the checkout
+    want="$(git -C "$repo_root" rev-parse --verify --quiet "$commit:$rel")" || return 1
+    have="$(git -C "$repo_root" hash-object --no-filters "$real")" || return 1
+    [[ "$want" == "$have" ]] || return 1
+  done
+}
+checkout_failed() {
+  echo "pre-push: cannot create a clean checkout of $1; no gate ran, push aborted." >&2
+  exit 1
+}
+
+# Read what is being pushed before running any gate.
+refs=()
+shas=()
+input_lines=() # kept verbatim, to hand to chained hooks
+while IFS= read -r line; do
+  input_lines+=("$line")
+  read -r local_ref local_sha _remote_ref _remote_sha <<<"$line"
+  [[ "$local_sha" =~ ^0+$ ]] && continue # deletion (all-zero ID, SHA-1 or SHA-256): nothing to test
+  if ! git -C "$repo_root" cat-file -e "${local_sha}^{commit}" 2>/dev/null; then
+    echo "pre-push: $local_ref @ $local_sha is not a commit; refusing to push it unchecked." >&2
+    exit 1
+  fi
+  refs+=("$local_ref")
+  shas+=("$local_sha")
+done
+
+# chain_existing_hooks: core.hooksPath replaces the hooks directory, so run what
+# would otherwise have run: the project's previous pre-push hook in
+# $GIT_COMMON_DIR/hooks (for example Git LFS or another tool's hook) or, if
+# there is none and the repository uses Git LFS, `git lfs pre-push`. Without
+# this, LFS objects would not be uploaded and clones would get bare pointers.
+# scan_lfs_payloads: the secrets gate only sees LFS pointers, so before anything
+# can upload LFS content (a previous hook or git lfs pre-push), scan the real
+# payloads of every pointer in the pushed history from local LFS storage.
+# Fails closed: a payload that is not available locally cannot be inspected.
+trusted_wt=""
+scan_lfs_payloads() {
+  local common storage oids oid obj tmpd missing=0 count=0 st=0 cfg=()
+  common="$(git -C "$repo_root" rev-parse --git-common-dir)"
+  [[ "$common" != /* ]] && common="$repo_root/$common"
+  storage="$(git -C "$repo_root" config --get lfs.storage || true)"
+  if [[ -z "$storage" ]]; then storage="$common/lfs"; elif [[ "$storage" != /* ]]; then storage="$common/$storage"; fi
+  oids="$(git -C "$repo_root" rev-list --objects "${shas[@]}" | cut -d' ' -f1 \
+    | git -C "$repo_root" cat-file --batch-check='%(objecttype) %(objectname) %(objectsize)' \
+    | awk '$1 == "blob" && $3 <= 1024 { print $2 }' \
+    | git -C "$repo_root" cat-file --batch \
+    | awk '
+        # One "<id> blob <size>" header per object, then its content. A pointer
+        # starts with a version line (current or legacy URL); extension lines
+        # (ext-N-name) may come before the oid line, as Git LFS allows.
+        { sub(/\r$/, "") } # CRLF pointers are valid for Git LFS too
+        /^[0-9a-f]{40}([0-9a-f]{24})? blob [0-9]+$/ { state = 1; next }
+        state == 1 { state = ($0 ~ /^version https:\/\/(git-lfs\.github\.com|hawser\.github\.com)\/spec\/v1$/) ? 2 : 0; next }
+        state == 2 && /^oid sha256:[0-9a-f]{64}$/ { sub(/^oid sha256:/, ""); print; state = 0; next }
+        state == 2 && /^ext-[0-9]+-[A-Za-z0-9_.-]+ sha256:[0-9a-f]{64}$/ { next }
+        { if (state == 2 && $0 !~ /^[a-z0-9.-]+ /) state = 0 }' | sort -u)"
+  [[ -z "$oids" ]] && return 0
+  if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-push: LFS payloads must be scanned but gitleaks is not installed; push aborted." >&2
+    exit 1
+  fi
+  tmpd="$(mktemp -d "${TMPDIR:-/tmp}/prepush-lfs.XXXXXX")" || exit 1
+  while IFS= read -r oid; do
+    obj="$storage/objects/${oid:0:2}/${oid:2:2}/$oid"
+    if [[ -f "$obj" ]]; then
+      cp "$obj" "$tmpd/$oid"
+      count=$((count + 1))
+    else
+      missing=$((missing + 1))
+    fi
+  done <<<"$oids"
+  if [[ $missing -gt 0 ]]; then
+    rm -rf "$tmpd"
+    echo "pre-push: cannot inspect $missing LFS object(s) referenced by the push (not in local LFS storage); push aborted." >&2
+    exit 1
+  fi
+  [[ -n "$trusted_wt" && -f "$trusted_wt/.gitleaks.toml" ]] && cfg=(--config "$trusted_wt/.gitleaks.toml")
+  # The ignore file comes from the pinned scanner, or is empty: never the
+  # developer's working tree (gitleaks' default ignore path is the current dir).
+  local ignore_file="$tmpd.ignore"
+  if [[ -n "$trusted_wt" && -f "$trusted_wt/.gitleaksignore" ]]; then
+    cp "$trusted_wt/.gitleaksignore" "$ignore_file"
+  else
+    : >"$ignore_file"
+  fi
+  # --ignore-gitleaks-allow: an inline marker inside a payload never suppresses a finding.
+  env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML gitleaks dir ${cfg[@]+"${cfg[@]}"} --no-banner --no-color \
+    --redact --exit-code 3 --ignore-gitleaks-allow --gitleaks-ignore-path "$ignore_file" \
+    "$tmpd" >/dev/null 2>&1 || st=$?
+  rm -rf "$tmpd" "$ignore_file"
+  case $st in
+    0) echo "pre-push: scanned $count LFS payload(s): no secrets." ;;
+    3) echo "pre-push: LFS payload(s) contain secrets (not shown); push aborted." >&2; exit 1 ;;
+    *) echo "pre-push: gitleaks failed on LFS payloads (exit $st); push aborted." >&2; exit 1 ;;
+  esac
+}
+
+# If you already had a custom core.hooksPath (husky, lefthook, ...), record its
+# pre-push hook before switching: git config forge.previousHook <path>.
+chain_existing_hooks() {
+  local legacy uses_lfs=0 tip
+  legacy="$(git -C "$repo_root" config --get forge.previousHook || true)"
+  if [[ -n "$legacy" ]]; then
+    [[ "$legacy" != /* ]] && legacy="$repo_root/$legacy"
+    if [[ ! -x "$legacy" ]]; then
+      echo "pre-push: forge.previousHook '$legacy' is not an executable file; push aborted." >&2
+      exit 1
+    fi
+  else
+    legacy="$(git -C "$repo_root" rev-parse --git-common-dir)/hooks/pre-push"
+    [[ "$legacy" != /* ]] && legacy="$repo_root/$legacy"
+  fi
+  if git -C "$repo_root" config --get-regexp '^filter\.lfs\.' >/dev/null 2>&1; then
+    uses_lfs=1
+  fi
+  # LFS anywhere in the pushed history (attributes or pointer files), not
+  # just at the pushed tips or in the checked-out branch.
+  if [[ $uses_lfs -eq 0 && ${#shas[@]} -gt 0 ]]; then
+    # The whole pushed history: tracking refs say what the fetch URL has, not
+    # what the push destination (possibly a different pushurl) has. -1 stops at
+    # the first match, so this stays cheap when LFS is in use.
+    if [[ -n "$(git -C "$repo_root" log --format=%H -1 -G 'filter=lfs' "${shas[@]}" -- .gitattributes '*/.gitattributes' 2>/dev/null)" ]] \
+      || [[ -n "$(git -C "$repo_root" log --format=%H -1 -G '^version https://git-lfs.github.com/spec/v1' "${shas[@]}" 2>/dev/null)" ]]; then
+      uses_lfs=1
+    fi
+    for tip in "${shas[@]}"; do # attributes present at a tip, even if already on a remote
+      if git -C "$repo_root" grep -q 'filter=lfs' "$tip" -- .gitattributes '*/.gitattributes' 2>/dev/null; then
+        uses_lfs=1
+      fi
+    done
+  fi
+  # Before any hook that could upload LFS content.
+  [[ ${#shas[@]} -gt 0 ]] && scan_lfs_payloads
+  if [[ -x "$legacy" ]]; then
+    echo "pre-push: running the previous pre-push hook ($legacy)..."
+    printf '%s\n' ${input_lines[@]+"${input_lines[@]}"} | "$legacy" "$@" || {
+      echo "pre-push: the previous pre-push hook failed, push aborted." >&2
+      exit 1
+    }
+  fi
+  # Always, when LFS is in use, even if a previous hook ran: that hook may not
+  # be LFS's, and running git lfs pre-push twice is harmless.
+  if [[ $uses_lfs -eq 1 ]]; then
+    if ! command -v git-lfs >/dev/null 2>&1; then
+      echo "pre-push: this push contains Git LFS content but git-lfs is not installed; push aborted." >&2
+      exit 1
+    fi
+    echo "pre-push: running git lfs pre-push..."
+    printf '%s\n' ${input_lines[@]+"${input_lines[@]}"} | git lfs pre-push "$@" || {
+      echo "pre-push: git lfs pre-push failed, push aborted." >&2
+      exit 1
+    }
+  fi
+}
+
+if [[ ${#shas[@]} -eq 0 ]]; then
+  chain_existing_hooks "$@"
+  exit 0
+fi
+
+# Resolve the trusted scanner: a pinned commit, never a ref that moves on fetch.
+bootstrap=0
+trusted="$(git -C "$repo_root" config --get forge.trustedCommit || true)"
+if [[ -z "$trusted" ]]; then
+  bootstrap=1 # nothing pinned yet
+elif [[ ! "$trusted" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+  echo "pre-push: forge.trustedCommit must be a full commit ID, not '$trusted'; push aborted." >&2
+  echo "  Pin a reviewed commit with: scripts/trust-scanner.sh <commit>" >&2
+  exit 1
+elif ! git -C "$repo_root" cat-file -e "${trusted}^{commit}" 2>/dev/null; then
+  echo "pre-push: pinned scanner commit ${trusted:0:12} is not in this clone (fetch it); push aborted." >&2
+  exit 1
+elif ! git -C "$repo_root" cat-file -e "$trusted:scripts/check_secrets.sh" 2>/dev/null; then
+  bootstrap=1 # the pinned commit predates the forge
+fi
+
+if [[ $bootstrap -eq 1 ]]; then
+  if [[ "${FORGE_BOOTSTRAP:-}" != "1" ]]; then
+    echo "pre-push: no trusted scanner pinned (or the pinned commit has none), so there is" >&2
+    echo "  nothing reviewed to scan with. Pin one: scripts/trust-scanner.sh refs/remotes/origin/main" >&2
+    echo "  Only for the push that introduces the forge: FORGE_BOOTSTRAP=1 git push ..." >&2
+    echo "  (each pushed tip is then scanned with its own scanner)." >&2
+    exit 1
+  fi
+  echo "pre-push: FORGE_BOOTSTRAP=1: using each pushed tip's own scanner."
+else
+  echo "pre-push: secrets gate (scanner from pinned commit ${trusted:0:12}; all refs + pushed commits)..."
+  wt="$(checkout "$trusted")" || checkout_failed "pinned commit ${trusted:0:12}"
+  worktrees+=("$wt")
+  trusted_wt="$wt"
+  if ! verify_raw "$wt" "$trusted"; then
+    echo "pre-push: the checked-out scanner differs from the pinned commit's bytes; push aborted." >&2
+    exit 1
+  fi
+  if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
+    echo "pre-push: secrets gate failed, push aborted." >&2
+    exit 1
+  fi
+fi
+
+for i in "${!shas[@]}"; do
+  sha="${shas[$i]}"
+  wt="$(checkout "$sha")" || checkout_failed "${refs[$i]} @ ${sha:0:7}"
+  worktrees+=("$wt")
+  if [[ $bootstrap -eq 1 ]]; then
+    echo "pre-push: secrets gate on ${refs[$i]} @ ${sha:0:7} (its committed scanner)..."
+    if ! (cd "$wt" && ./scripts/check_secrets.sh "${shas[@]}"); then
+      echo "pre-push: secrets gate failed, push aborted." >&2
+      exit 1
+    fi
+  fi
+  echo "pre-push: quality gate on ${refs[$i]} @ ${sha:0:7} (clean checkout)..."
+  if ! (cd "$wt" && ./scripts/check.sh); then
+    echo "pre-push: checks failed for ${refs[$i]} @ ${sha:0:7}, push aborted." >&2
+    exit 1
+  fi
+done
+
+# All gates passed: run the hooks core.hooksPath would otherwise have bypassed.
+chain_existing_hooks "$@"
