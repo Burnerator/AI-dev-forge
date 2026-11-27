@@ -561,6 +561,31 @@ else
   echo "  skip LFS payload secret (git-lfs not installed)"
 fi
 
+# lfs_object <dir> <file> <payload> <pointer-style>: store <payload> in local LFS
+# storage and commit <file> as a pointer to it (canonical, ext or legacy).
+lfs_object() {
+  local p="$1" file="$2" payload="$3" style="$4" oid size d
+  oid="$(printf '%s' "$payload" | shasum -a 256 | cut -d' ' -f1)"; size="${#payload}"
+  d="$p/.git/lfs/objects/${oid:0:2}/${oid:2:2}"; mkdir -p "$d"; printf '%s' "$payload" > "$d/$oid"
+  case "$style" in
+    canonical) printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$size" ;;
+    ext) printf 'version https://git-lfs.github.com/spec/v1\next-0-foo sha256:%064d\noid sha256:%s\nsize %s\n' 7 "$oid" "$size" ;;
+    legacy) printf 'version https://hawser.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$size" ;;
+  esac > "$p/$file"
+  echo "$file filter=lfs diff=lfs merge=lfs -text" >> "$p/.gitattributes"
+  git -C "$p" add .gitattributes "$file"; git -C "$p" commit -qm "lfs $style"
+}
+for style in ext legacy; do
+  p="$tmp/push-lfs-$style"; new_project "$p"
+  lfs_object "$p" "data.txt" "token = \"$(fake_token)\"" "$style"
+  rejects "scans the payload of an LFS pointer with $style syntax" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+  check "nothing reached the remote ($style pointer)" no_remote_ref "$p.remote.git" refs/heads/main
+done
+p="$tmp/push-lfs-allow"; new_project "$p"
+lfs_object "$p" "data.txt" "token = \"$(fake_token)\" # gitleaks:allow" canonical
+rejects "an inline gitleaks:allow inside an LFS payload does not suppress the finding" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote (allow marker in LFS)" no_remote_ref "$p.remote.git" refs/heads/main
+
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main
 echo y > "$p/y"; git -C "$p" add y; git -C "$p" commit -qm "token $(fake_token)"

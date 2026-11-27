@@ -115,9 +115,15 @@ scan_lfs_payloads() {
     | git -C "$repo_root" cat-file --batch-check='%(objecttype) %(objectname) %(objectsize)' \
     | awk '$1 == "blob" && $3 <= 1024 { print $2 }' \
     | git -C "$repo_root" cat-file --batch \
-    | awk '/^version https:\/\/git-lfs\.github\.com\/spec\/v1$/ { p = 1; next }
-           p && /^oid sha256:[0-9a-f]{64}$/ { sub(/^oid sha256:/, ""); print; p = 0; next }
-           { p = 0 }' | sort -u)"
+    | awk '
+        # One "<id> blob <size>" header per object, then its content. A pointer
+        # starts with a version line (current or legacy URL); extension lines
+        # (ext-N-name) may come before the oid line, as Git LFS allows.
+        /^[0-9a-f]{40}([0-9a-f]{24})? blob [0-9]+$/ { state = 1; next }
+        state == 1 { state = ($0 ~ /^version https:\/\/(git-lfs\.github\.com|hawser\.github\.com)\/spec\/v1$/) ? 2 : 0; next }
+        state == 2 && /^oid sha256:[0-9a-f]{64}$/ { sub(/^oid sha256:/, ""); print; state = 0; next }
+        state == 2 && /^ext-[0-9]+-[A-Za-z0-9_.-]+ sha256:[0-9a-f]{64}$/ { next }
+        { if (state == 2 && $0 !~ /^[a-z0-9.-]+ /) state = 0 }' | sort -u)"
   [[ -z "$oids" ]] && return 0
   if ! command -v gitleaks >/dev/null 2>&1; then
     echo "pre-push: LFS payloads must be scanned but gitleaks is not installed; push aborted." >&2
@@ -139,8 +145,9 @@ scan_lfs_payloads() {
     exit 1
   fi
   [[ -n "$trusted_wt" && -f "$trusted_wt/.gitleaks.toml" ]] && cfg=(--config "$trusted_wt/.gitleaks.toml")
+  # --ignore-gitleaks-allow: an inline marker inside a payload never suppresses a finding.
   env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML gitleaks dir ${cfg[@]+"${cfg[@]}"} --no-banner --no-color \
-    --redact --exit-code 3 "$tmpd" >/dev/null 2>&1 || st=$?
+    --redact --exit-code 3 --ignore-gitleaks-allow "$tmpd" >/dev/null 2>&1 || st=$?
   rm -rf "$tmpd"
   case $st in
     0) echo "pre-push: scanned $count LFS payload(s): no secrets." ;;

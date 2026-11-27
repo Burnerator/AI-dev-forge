@@ -10,8 +10,12 @@
 #   Synthetic values only: a random ghp_-shaped token, example.com email.
 #
 # Expected: lightweight and clean annotated tags pass; a tag with a token in its
-# message and a tag with a personal tagger email fail for those reasons; a tag
-# moved right after its push fails its first run as "moved".
+# message and a tag with a personal tagger email fail for those reasons; for a
+# tag moved right after its push, the run for its first (violating) object fails
+# and the run for the clean replacement passes. This check is race-tolerant:
+# the first run may fail for the email or as "moved", depending on when GitHub
+# fetches. The "moved" diagnostic itself is proven deterministically by the
+# --tag tests in tests/test_gates.sh.
 set -euo pipefail
 repo="${1:?usage: $0 <owner/disposable-repo>}"
 forge="$(cd "$(dirname "$0")/../.." && pwd -P)"
