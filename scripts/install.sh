@@ -211,9 +211,13 @@ if common_dir="$(git -C "$TARGET" rev-parse --git-common-dir 2>/dev/null)"; then
     echo "  ${hooks_dir#"$TARGET"/}: ${others[*]}"
     echo "  The forge's pre-push hook chains only pre-push. Copy (or symlink) the others"
     echo "  into .githooks/ before enabling it, or they will silently stop running."
-    if [[ -x "$hooks_dir/pre-push" && "$hooks_dir" != "$common_dir/hooks" ]]; then
-      echo "  Also record the existing pre-push: git config forge.previousHook ${hooks_dir#"$TARGET"/}/pre-push"
-    fi
+  fi
+  # A custom pre-push, even on its own: it must be recorded before switching.
+  if [[ -x "$hooks_dir/pre-push" && "$hooks_dir" != "$common_dir/hooks" ]]; then
+    echo
+    echo "WARNING: a custom pre-push hook is active in ${hooks_dir#"$TARGET"/}. Record it before"
+    echo "  enabling core.hooksPath=.githooks, or it will stop running:"
+    echo "  git config forge.previousHook ${hooks_dir#"$TARGET"/}/pre-push"
   fi
 fi
 

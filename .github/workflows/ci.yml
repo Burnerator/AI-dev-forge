@@ -1,7 +1,10 @@
 name: CI
 
 on:
-  push: # every branch: anything published gets checked
+  # Pushes to any branch or tag, and pull requests. This is a backstop: a push to
+  # an unprotected branch can skip it ([skip ci]) or remove this file, so it
+  # does not guard every published ref (see docs/enforcement.md, Limits).
+  push:
   pull_request:
 
 permissions:

@@ -29,8 +29,14 @@ git config user.email "1+forge-e2e@users.noreply.github.com"
 "$forge/scripts/install.sh" . >/dev/null
 printf '#!/usr/bin/env bash\necho "checks ok"\n' > scripts/check.sh
 git add -A && git commit -qm "chore: forge e2e fixture"
-git remote add origin "https://github.com/$repo.git"
-if [[ -n "$(git ls-remote origin)" ]]; then
+# FORGE_E2E_REMOTE_URL overrides the URL, for the script's own local tests.
+git remote add origin "${FORGE_E2E_REMOTE_URL:-https://github.com/$repo.git}"
+# A failed lookup must never look like "empty": check the exit status first.
+if ! remote_refs="$(git ls-remote origin 2>/dev/null)"; then
+  echo "ERROR: cannot list the refs of $repo; refusing to push to it." >&2
+  exit 1
+fi
+if [[ -n "$remote_refs" ]]; then
   echo "ERROR: $repo is not empty; this test only runs against a fresh, empty repository." >&2
   exit 1
 fi
@@ -43,10 +49,15 @@ git tag "e2e-light-$run_id"
 git tag -a "e2e-annotated-$run_id" -m "clean annotated release"
 git tag -a "e2e-secret-$run_id" -m "release notes token $token"
 git -c user.email=someone@example.com tag -a "e2e-email-$run_id" -m "personal tagger"
-# The first object violates the policy (personal tagger); the replacement is clean.
+# The first object violates the policy (personal tagger) and points at the
+# fixture commit; the clean replacement points at a different, new commit, so
+# each run must check out and scan its own event's commit.
+first_commit="$(git rev-parse HEAD)"
 git -c user.email=someone@example.com tag -a "e2e-moved-$run_id" -m "first object"
 for t in "e2e-light-$run_id" "e2e-annotated-$run_id" "e2e-secret-$run_id" "e2e-email-$run_id" "e2e-moved-$run_id"; do git push -q origin "refs/tags/$t"; done
 first_moved="$(git rev-parse "e2e-moved-$run_id")"
+echo "moved" > moved.txt && git add moved.txt && git commit -qm "chore: commit for the moved tag"
+second_commit="$(git rev-parse HEAD)"
 git tag -f -a "e2e-moved-$run_id" -m "second object" >/dev/null
 git push -q --force origin "refs/tags/e2e-moved-$run_id"
 
@@ -100,7 +111,10 @@ while read -r id concl; do
   log="$(perl -e 'alarm 90; exec @ARGV' gh run view "$id" -R "$repo" --log 2>/dev/null || true)"
   if grep -q "PUSHED_OBJECT: $first_moved" <<<"$log"; then
     seen_first=1
-    if [[ "$concl" == failure ]] && grep -qE "non-noreply email|now points to .* not ${first_moved:0:12}" <<<"$log"; then
+    # Either it checked out the first commit and failed for the email, or the
+    # tag had already moved and it failed as moved.
+    if [[ "$concl" == failure ]] && { { grep -q "HEAD is now at ${first_commit:0:7}" <<<"$log" && grep -q "non-noreply email" <<<"$log"; } \
+      || grep -qE "now points to .* not ${first_moved:0:12}" <<<"$log"; }; then
       echo "  ok   e2e-moved-$run_id first object: failure (email or moved)"
     else
       echo "  FAIL e2e-moved-$run_id first object: $concl, expected a failure for the email or the move" >&2
@@ -108,10 +122,10 @@ while read -r id concl; do
     fi
   elif grep -q "PUSHED_OBJECT: $second_moved" <<<"$log"; then
     seen_second=1
-    if [[ "$concl" == success ]]; then
-      echo "  ok   e2e-moved-$run_id replacement: success"
+    if [[ "$concl" == success ]] && grep -q "HEAD is now at ${second_commit:0:7}" <<<"$log"; then
+      echo "  ok   e2e-moved-$run_id replacement: success, on its own commit ${second_commit:0:7}"
     else
-      echo "  FAIL e2e-moved-$run_id replacement: $concl, expected success" >&2
+      echo "  FAIL e2e-moved-$run_id replacement: $concl, expected success on commit ${second_commit:0:7}" >&2
       fails=$((fails + 1))
     fi
   fi

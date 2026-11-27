@@ -717,6 +717,24 @@ git -C "$q" commit -q --allow-empty -m empty
 "$forge/scripts/install.sh" "$q" >/dev/null
 rejects "refuses a commit without a scanner" "has no scripts/check_secrets.sh" trust "$q" --yes HEAD
 
+echo "tests/e2e/github-tags.sh guards (local, no network)"
+e2e="$forge/tests/e2e/github-tags.sh"
+bare="$tmp/e2e-target.git"; git init -q --bare -b main "$bare"
+lsfail="$tmp/lsfail"; mkdir -p "$lsfail"; realgit="$(command -v git)"
+cat > "$lsfail/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == ls-remote ]]; then exit 128; fi
+exec "$realgit" "\$@"
+EOF
+chmod +x "$lsfail/git"
+rejects "e2e: a failed ls-remote is not taken as an empty repository" "cannot list the refs" env PATH="$lsfail:$PATH" FORGE_E2E_REMOTE_URL="$bare" bash "$e2e" owner/repo
+check "e2e: nothing was pushed after the failed lookup" test -z "$(git -C "$bare" for-each-ref)"
+other="$tmp/e2e-nonempty"; git init -q -b main "$other"; git -C "$other" -c user.email=1+t@users.noreply.github.com -c user.name=t commit -q --allow-empty -m x
+git init -q --bare -b main "$tmp/e2e-nonempty.git"; git -C "$other" push -q "$tmp/e2e-nonempty.git" main
+before="$(git -C "$tmp/e2e-nonempty.git" for-each-ref)"
+rejects "e2e: refuses a non-empty repository" "is not empty" env FORGE_E2E_REMOTE_URL="$tmp/e2e-nonempty.git" bash "$e2e" owner/repo
+check "e2e: the non-empty repository is untouched" test "$(git -C "$tmp/e2e-nonempty.git" for-each-ref)" = "$before"
+
 if [[ $fails -ne 0 ]]; then
   echo "$fails test(s) failed" >&2
   exit 1
