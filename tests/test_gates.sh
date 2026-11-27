@@ -571,16 +571,38 @@ lfs_object() {
     canonical) printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$size" ;;
     ext) printf 'version https://git-lfs.github.com/spec/v1\next-0-foo sha256:%064d\noid sha256:%s\nsize %s\n' 7 "$oid" "$size" ;;
     legacy) printf 'version https://hawser.github.com/spec/v1\noid sha256:%s\nsize %s\n' "$oid" "$size" ;;
+    crlf) printf 'version https://git-lfs.github.com/spec/v1\r\noid sha256:%s\r\nsize %s\r\n' "$oid" "$size" ;;
   esac > "$p/$file"
   echo "$file filter=lfs diff=lfs merge=lfs -text" >> "$p/.gitattributes"
   git -C "$p" add .gitattributes "$file"; git -C "$p" commit -qm "lfs $style"
 }
-for style in ext legacy; do
+for style in ext legacy crlf; do
   p="$tmp/push-lfs-$style"; new_project "$p"
   lfs_object "$p" "data.txt" "token = \"$(fake_token)\"" "$style"
   rejects "scans the payload of an LFS pointer with $style syntax" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
   check "nothing reached the remote ($style pointer)" no_remote_ref "$p.remote.git" refs/heads/main
 done
+p="$tmp/push-lfs-wt-ignore"; new_project "$p"
+payload="token = \"$(fake_token)\""
+lfs_object "$p" "data.txt" "$payload" canonical
+oid="$(printf '%s' "$payload" | shasum -a 256 | cut -d' ' -f1)"
+printf '%s:github-pat:1\n%s:generic-api-key:1\n' "$oid" "$oid" > "$p/.gitleaksignore" # working tree only, not committed
+rejects "a working-tree .gitleaksignore cannot suppress an LFS payload finding" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+
+p="$tmp/push-old-git"; new_project "$p"
+oldgit="$tmp/oldgit"; mkdir -p "$oldgit"; realgit="$(command -v git)"
+cat > "$oldgit/git" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == version ]]; then echo "git version 2.39.5"; exit 0; fi
+exec "$realgit" "\$@"
+EOF
+chmod +x "$oldgit/git"
+# git prepends its exec-path to PATH for hooks, so call the hook directly, as
+# git would, with the shim first on PATH.
+old_git_hook() { (cd "$1" && printf 'refs/heads/main %s refs/heads/main %040d\n' "$(git rev-parse main)" 0 \
+  | env PATH="$oldgit:$PATH" FORGE_BOOTSTRAP=1 bash .githooks/pre-push origin "$1.remote.git"); }
+rejects "refuses to run with git older than 2.40" "git 2.40 or newer is required" old_git_hook "$p"
+
 p="$tmp/push-lfs-allow"; new_project "$p"
 lfs_object "$p" "data.txt" "token = \"$(fake_token)\" # gitleaks:allow" canonical
 rejects "an inline gitleaks:allow inside an LFS payload does not suppress the finding" "LFS payload\\(s\\) contain secrets" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main

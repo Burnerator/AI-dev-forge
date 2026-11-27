@@ -16,7 +16,7 @@ Not sure if something fits? Open an issue first. For larger changes, always open
 
 ## Set up your clone
 
-You need `git`, `bash`, [`shellcheck`](https://www.shellcheck.net) and [`gitleaks`](https://github.com/gitleaks/gitleaks#installing). On macOS: `brew install shellcheck gitleaks`.
+You need `git` 2.40 or newer, `bash`, [`shellcheck`](https://www.shellcheck.net), [`gitleaks`](https://github.com/gitleaks/gitleaks#installing) and Python 3.11+; `git-lfs` makes the real LFS round-trip tests run (they are skipped without it). On macOS: `brew install shellcheck gitleaks git-lfs`.
 
 ```bash
 git clone https://github.com/Burnerator/AI-dev-forge.git   # or your fork
@@ -35,7 +35,7 @@ The repository is public. Your commit email ends up in the history, so use your 
 ./scripts/check_secrets.sh  # no .env in history, no leaked keys, noreply identities
 ```
 
-`check.sh` runs `tests/test_install.sh` (installer) and `tests/test_gates.sh` (the hook and the secrets gate against throwaway repositories and a local bare remote). Changes to the CI tag path should also be checked on GitHub with `tests/e2e/github-tags.sh <owner/disposable-repo>`. Both must pass before you push; the `pre-push` hook runs them for you, and CI runs them again on Ubuntu and macOS.
+`check.sh` runs `tests/test_install.sh` (installer) and `tests/test_gates.sh` (the hook and the secrets gate against throwaway repositories and a local bare remote). Both must pass before you push; the `pre-push` hook runs them for you, and CI runs them again on Ubuntu and macOS. They are local suites only. The GitHub tag smoke test (`tests/e2e/github-tags.sh`) never runs automatically: maintainers run it by hand, against a fresh empty disposable repository, whenever a change touches the CI tag path (the tag steps or concurrency of the workflows, or `check_secrets.sh --tag`).
 
 Never use `git push --no-verify`. If a gate blocks you and you think it is wrong, open an issue.
 

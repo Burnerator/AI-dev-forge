@@ -34,6 +34,14 @@ export GIT_NO_REPLACE_OBJECTS=1
 export GIT_GRAFT_FILE=/nonexistent/forge-ignores-grafts # a path that never exists; /dev/null would count as a graft file
 repo_root="$(git rev-parse --show-toplevel)"
 
+# git >= 2.40 is required (--attr-source for filter-free checkouts).
+git_version="$(git version | sed -n 's/^git version \([0-9][0-9]*\)\.\([0-9][0-9]*\).*/\1 \2/p')"
+read -r git_major git_minor <<<"${git_version:-0 0}"
+if [[ $git_major -lt 2 || ( $git_major -eq 2 && $git_minor -lt 40 ) ]]; then
+  echo "pre-push: git 2.40 or newer is required (found: $(git version)); push aborted." >&2
+  exit 1
+fi
+
 worktrees=()
 cleanup() {
   local wt
@@ -119,6 +127,7 @@ scan_lfs_payloads() {
         # One "<id> blob <size>" header per object, then its content. A pointer
         # starts with a version line (current or legacy URL); extension lines
         # (ext-N-name) may come before the oid line, as Git LFS allows.
+        { sub(/\r$/, "") } # CRLF pointers are valid for Git LFS too
         /^[0-9a-f]{40}([0-9a-f]{24})? blob [0-9]+$/ { state = 1; next }
         state == 1 { state = ($0 ~ /^version https:\/\/(git-lfs\.github\.com|hawser\.github\.com)\/spec\/v1$/) ? 2 : 0; next }
         state == 2 && /^oid sha256:[0-9a-f]{64}$/ { sub(/^oid sha256:/, ""); print; state = 0; next }
@@ -145,10 +154,19 @@ scan_lfs_payloads() {
     exit 1
   fi
   [[ -n "$trusted_wt" && -f "$trusted_wt/.gitleaks.toml" ]] && cfg=(--config "$trusted_wt/.gitleaks.toml")
+  # The ignore file comes from the pinned scanner, or is empty: never the
+  # developer's working tree (gitleaks' default ignore path is the current dir).
+  local ignore_file="$tmpd.ignore"
+  if [[ -n "$trusted_wt" && -f "$trusted_wt/.gitleaksignore" ]]; then
+    cp "$trusted_wt/.gitleaksignore" "$ignore_file"
+  else
+    : >"$ignore_file"
+  fi
   # --ignore-gitleaks-allow: an inline marker inside a payload never suppresses a finding.
   env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML gitleaks dir ${cfg[@]+"${cfg[@]}"} --no-banner --no-color \
-    --redact --exit-code 3 --ignore-gitleaks-allow "$tmpd" >/dev/null 2>&1 || st=$?
-  rm -rf "$tmpd"
+    --redact --exit-code 3 --ignore-gitleaks-allow --gitleaks-ignore-path "$ignore_file" \
+    "$tmpd" >/dev/null 2>&1 || st=$?
+  rm -rf "$tmpd" "$ignore_file"
   case $st in
     0) echo "pre-push: scanned $count LFS payload(s): no secrets." ;;
     3) echo "pre-push: LFS payload(s) contain secrets (not shown); push aborted." >&2; exit 1 ;;
