@@ -47,6 +47,13 @@ printf '#!/bin/sh\nexit 0\n' > "$p/.git/hooks/pre-push"; chmod +x "$p/.git/hooks
 out="$("$install" "$p")"
 check "names the hooks it would disable" grep -q "commit-msg pre-commit" <<<"$out"
 check "does not list pre-push (chained) or samples" test -z "$(grep -E 'WARNING.*' -A1 <<<"$out" | grep -E 'pre-push|\.sample')"
+p="$tmp/custom-hookspath"; mkdir -p "$p/.husky"; git -C "$p" init -q
+git -C "$p" config core.hooksPath .husky
+printf '#!/bin/sh\nexit 0\n' > "$p/.husky/pre-commit"; chmod +x "$p/.husky/pre-commit"
+printf '#!/bin/sh\nexit 0\n' > "$p/.husky/pre-push"; chmod +x "$p/.husky/pre-push"
+out="$("$install" "$p")"
+check "inspects a custom core.hooksPath, not .git/hooks" grep -q "\.husky: pre-commit" <<<"$out"
+check "suggests recording the custom pre-push as forge.previousHook" grep -q "forge.previousHook .husky/pre-push" <<<"$out"
 p="$tmp/no-other-hooks"; mkdir -p "$p"; git -C "$p" init -q
 out="$("$install" "$p")"
 check "no warning when only sample hooks exist" test -z "$(grep WARNING <<<"$out")"

@@ -41,10 +41,13 @@ jobs:
           GITLEAKS_VERSION: "8.30.1"
           GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
+          # A fresh runner-owned directory, outside the PR-controlled checkout, so
+          # no committed symlink can redirect the download or the extraction.
+          d="$(mktemp -d "$RUNNER_TEMP/gitleaks.XXXXXX")"
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
-          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c -
-          tar -xzf "$f" gitleaks && sudo mv gitleaks /usr/local/bin/
+          curl -sSfL -o "$d/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          (cd "$d" && echo "${GITLEAKS_SHA256}  $f" | sha256sum -c - && tar -xzf "$f" gitleaks)
+          sudo install -m 0755 "$d/gitleaks" /usr/local/bin/gitleaks
       - name: Secrets gate (history of the commit under test only)
         run: ./scripts/check_secrets.sh --only HEAD
       - name: Secrets gate on the pushed tag (message and tagger identity)
@@ -74,9 +77,12 @@ jobs:
           GITLEAKS_VERSION: "8.30.1"
           GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
         run: |
+          # A fresh runner-owned directory, outside the PR-controlled checkout, so
+          # no committed symlink can redirect the download or the extraction.
+          d="$(mktemp -d "$RUNNER_TEMP/gitleaks.XXXXXX")"
           f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
-          echo "${GITLEAKS_SHA256}  $f" | sha256sum -c -
-          tar -xzf "$f" gitleaks && sudo mv gitleaks /usr/local/bin/
+          curl -sSfL -o "$d/$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/$f"
+          (cd "$d" && echo "${GITLEAKS_SHA256}  $f" | sha256sum -c - && tar -xzf "$f" gitleaks)
+          sudo install -m 0755 "$d/gitleaks" /usr/local/bin/gitleaks
       - name: Quality gate
         run: ./scripts/check.sh

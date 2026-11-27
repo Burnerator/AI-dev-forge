@@ -39,7 +39,8 @@ git tag "e2e-light-$run_id"
 git tag -a "e2e-annotated-$run_id" -m "clean annotated release"
 git tag -a "e2e-secret-$run_id" -m "release notes token $token"
 git -c user.email=someone@example.com tag -a "e2e-email-$run_id" -m "personal tagger"
-git tag -a "e2e-moved-$run_id" -m "first object"
+# The first object violates the policy (personal tagger); the replacement is clean.
+git -c user.email=someone@example.com tag -a "e2e-moved-$run_id" -m "first object"
 for t in "e2e-light-$run_id" "e2e-annotated-$run_id" "e2e-secret-$run_id" "e2e-email-$run_id" "e2e-moved-$run_id"; do git push -q origin "refs/tags/$t"; done
 first_moved="$(git rev-parse "e2e-moved-$run_id")"
 git tag -f -a "e2e-moved-$run_id" -m "second object" >/dev/null
@@ -83,22 +84,38 @@ expect "e2e-annotated-$run_id" success
 expect "e2e-secret-$run_id" failure "annotated tag\\(s\\) contain secrets"
 expect "e2e-email-$run_id" failure "non-noreply email"
 # Moved tag: whether the first runner fetches before or after the move is not
-# under our control. Each run must either fail as "moved" or pass, and a pass
-# is only possible when the fetched tag is the object its own event reported.
+# under our control, so tell the two runs apart by the object their event
+# reported. The run for the first (violating) object must fail, either for the
+# personal email or as moved; the run for the clean replacement must pass.
+second_moved="$(git rev-parse "e2e-moved-$run_id")"
 moved_runs="$(gh run list -R "$repo" --limit 50 --json headBranch,databaseId,conclusion,createdAt \
   -q ".[]|select(.headBranch==\"e2e-moved-$run_id\" and .createdAt >= \"$started\")|\"\(.databaseId) \(.conclusion)\"")"
+seen_first=0; seen_second=0
 while read -r id concl; do
   [[ -z "$id" ]] && continue
-  if [[ "$concl" == success ]]; then
-    echo "  ok   e2e-moved-$run_id run $id: success (scanned its own event object)"
-  elif [[ "$concl" == failure ]] && perl -e 'alarm 90; exec @ARGV' gh run view "$id" -R "$repo" --log-failed 2>/dev/null | grep -qE "now points to .* not "; then
-    echo "  ok   e2e-moved-$run_id run $id: failure as moved"
-  else
-    echo "  FAIL e2e-moved-$run_id run $id: $concl, neither a pass nor a 'moved' failure" >&2
-    fails=$((fails + 1))
+  log="$(perl -e 'alarm 90; exec @ARGV' gh run view "$id" -R "$repo" --log 2>/dev/null || true)"
+  if grep -q "PUSHED_OBJECT: $first_moved" <<<"$log"; then
+    seen_first=1
+    if [[ "$concl" == failure ]] && grep -qE "non-noreply email|now points to .* not ${first_moved:0:12}" <<<"$log"; then
+      echo "  ok   e2e-moved-$run_id first object: failure (email or moved)"
+    else
+      echo "  FAIL e2e-moved-$run_id first object: $concl, expected a failure for the email or the move" >&2
+      fails=$((fails + 1))
+    fi
+  elif grep -q "PUSHED_OBJECT: $second_moved" <<<"$log"; then
+    seen_second=1
+    if [[ "$concl" == success ]]; then
+      echo "  ok   e2e-moved-$run_id replacement: success"
+    else
+      echo "  FAIL e2e-moved-$run_id replacement: $concl, expected success" >&2
+      fails=$((fails + 1))
+    fi
   fi
 done <<<"$moved_runs"
-: "${first_moved:?}" # the object of the first push, kept for diagnosis
+if [[ $seen_first -eq 0 || $seen_second -eq 0 ]]; then
+  echo "  FAIL e2e-moved-$run_id: could not find a run for each object" >&2
+  fails=$((fails + 1))
+fi
 
 if [[ $fails -ne 0 ]]; then
   echo "$fails e2e check(s) failed" >&2

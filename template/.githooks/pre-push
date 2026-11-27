@@ -100,6 +100,55 @@ done
 # $GIT_COMMON_DIR/hooks (for example Git LFS or another tool's hook) or, if
 # there is none and the repository uses Git LFS, `git lfs pre-push`. Without
 # this, LFS objects would not be uploaded and clones would get bare pointers.
+# scan_lfs_payloads: the secrets gate only sees LFS pointers, so before anything
+# can upload LFS content (a previous hook or git lfs pre-push), scan the real
+# payloads of every pointer in the pushed history from local LFS storage.
+# Fails closed: a payload that is not available locally cannot be inspected.
+trusted_wt=""
+scan_lfs_payloads() {
+  local common storage oids oid obj tmpd missing=0 count=0 st=0 cfg=()
+  common="$(git -C "$repo_root" rev-parse --git-common-dir)"
+  [[ "$common" != /* ]] && common="$repo_root/$common"
+  storage="$(git -C "$repo_root" config --get lfs.storage || true)"
+  if [[ -z "$storage" ]]; then storage="$common/lfs"; elif [[ "$storage" != /* ]]; then storage="$common/$storage"; fi
+  oids="$(git -C "$repo_root" rev-list --objects "${shas[@]}" | cut -d' ' -f1 \
+    | git -C "$repo_root" cat-file --batch-check='%(objecttype) %(objectname) %(objectsize)' \
+    | awk '$1 == "blob" && $3 <= 1024 { print $2 }' \
+    | git -C "$repo_root" cat-file --batch \
+    | awk '/^version https:\/\/git-lfs\.github\.com\/spec\/v1$/ { p = 1; next }
+           p && /^oid sha256:[0-9a-f]{64}$/ { sub(/^oid sha256:/, ""); print; p = 0; next }
+           { p = 0 }' | sort -u)"
+  [[ -z "$oids" ]] && return 0
+  if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-push: LFS payloads must be scanned but gitleaks is not installed; push aborted." >&2
+    exit 1
+  fi
+  tmpd="$(mktemp -d "${TMPDIR:-/tmp}/prepush-lfs.XXXXXX")" || exit 1
+  while IFS= read -r oid; do
+    obj="$storage/objects/${oid:0:2}/${oid:2:2}/$oid"
+    if [[ -f "$obj" ]]; then
+      cp "$obj" "$tmpd/$oid"
+      count=$((count + 1))
+    else
+      missing=$((missing + 1))
+    fi
+  done <<<"$oids"
+  if [[ $missing -gt 0 ]]; then
+    rm -rf "$tmpd"
+    echo "pre-push: cannot inspect $missing LFS object(s) referenced by the push (not in local LFS storage); push aborted." >&2
+    exit 1
+  fi
+  [[ -n "$trusted_wt" && -f "$trusted_wt/.gitleaks.toml" ]] && cfg=(--config "$trusted_wt/.gitleaks.toml")
+  env -u GITLEAKS_CONFIG -u GITLEAKS_CONFIG_TOML gitleaks dir ${cfg[@]+"${cfg[@]}"} --no-banner --no-color \
+    --redact --exit-code 3 "$tmpd" >/dev/null 2>&1 || st=$?
+  rm -rf "$tmpd"
+  case $st in
+    0) echo "pre-push: scanned $count LFS payload(s): no secrets." ;;
+    3) echo "pre-push: LFS payload(s) contain secrets (not shown); push aborted." >&2; exit 1 ;;
+    *) echo "pre-push: gitleaks failed on LFS payloads (exit $st); push aborted." >&2; exit 1 ;;
+  esac
+}
+
 # If you already had a custom core.hooksPath (husky, lefthook, ...), record its
 # pre-push hook before switching: git config forge.previousHook <path>.
 chain_existing_hooks() {
@@ -134,6 +183,8 @@ chain_existing_hooks() {
       fi
     done
   fi
+  # Before any hook that could upload LFS content.
+  [[ ${#shas[@]} -gt 0 ]] && scan_lfs_payloads
   if [[ -x "$legacy" ]]; then
     echo "pre-push: running the previous pre-push hook ($legacy)..."
     printf '%s\n' ${input_lines[@]+"${input_lines[@]}"} | "$legacy" "$@" || {
@@ -190,6 +241,7 @@ else
   echo "pre-push: secrets gate (scanner from pinned commit ${trusted:0:12}; all refs + pushed commits)..."
   wt="$(checkout "$trusted")" || checkout_failed "pinned commit ${trusted:0:12}"
   worktrees+=("$wt")
+  trusted_wt="$wt"
   if ! verify_raw "$wt" "$trusted"; then
     echo "pre-push: the checked-out scanner differs from the pinned commit's bytes; push aborted." >&2
     exit 1

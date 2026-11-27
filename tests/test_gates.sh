@@ -77,6 +77,13 @@ bootstrap_push() {
   git -C "$1" config forge.trustedCommit "$(git -C "$1" rev-parse "$2")"
 }
 
+# fake_lfs_payload <dir>: a clean payload for the all-zero test pointer, so the
+# hook's LFS payload scan can read it.
+fake_lfs_payload() {
+  local d="$1/.git/lfs/objects/00/00"
+  mkdir -p "$d"; echo "clean payload" > "$d/$(printf '%064d' 0)"
+}
+
 secrets() { (cd "$1" && ./scripts/check_secrets.sh "${@:2}"); }
 LEAK='gitleaks found [0-9]+ secret'
 ENV='\.env file\(s\) present'
@@ -488,7 +495,7 @@ check "no smudge filter ran during the gates" test ! -e "$marker"
 
 p="$tmp/push-lfs-second"; new_project "$p"
 echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
-printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"; fake_lfs_payload "$p"
 git -C "$p" add -A; git -C "$p" commit -qm "lfs pointer in an ancestor"
 PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main # origin now has the LFS history
 git -C "$p" config forge.trustedCommit "$(git -C "$p" rev-parse main)"
@@ -502,7 +509,7 @@ check "git lfs pre-push ran for history the second remote lacks" grep -q "^pre-p
 
 p="$tmp/push-lfs-pushurl"; new_project "$p"
 echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
-printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 0 > "$p/a.bin"; fake_lfs_payload "$p"
 git -C "$p" add -A; git -C "$p" commit -qm "lfs pointer in an ancestor"
 git -C "$p" rm -q .gitattributes; git -C "$p" commit -qm "attributes removed"
 PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push -q origin main # the fetch URL has it all
@@ -532,6 +539,27 @@ git -C "$p" rm -q config.txt; git -C "$p" commit -qm "remove config"
 echo "$(git -C "$p" rev-parse HEAD) $(git -C "$p" rev-parse main)" > "$p/.git/info/grafts" # skip the secret commit
 rejects "the hook ignores grafts that hide a pushed secret" "$LEAK" git -C "$p" push origin feat/g
 check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/feat/g
+
+p="$tmp/push-lfs-missing-payload"; new_project "$p"
+echo '*.bin filter=lfs diff=lfs merge=lfs -text' > "$p/.gitattributes"
+printf 'version https://git-lfs.github.com/spec/v1\noid sha256:%064d\nsize 3\n' 1 > "$p/a.bin"
+git -C "$p" add -A; git -C "$p" commit -qm "pointer without a local payload"
+rejects "fails closed when an LFS payload cannot be inspected" "cannot inspect 1 LFS object" env PATH="$lfsbin:$PATH" FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+check "nothing reached the remote" no_remote_ref "$p.remote.git" refs/heads/main
+
+if command -v git-lfs >/dev/null 2>&1; then
+  p="$tmp/push-lfs-secret"; new_project "$p"
+  git -C "$p" lfs install --local --skip-repo >/dev/null
+  (cd "$p" && git lfs track "*.txt" >/dev/null)
+  printf 'token = "%s"\n' "$(fake_token)" > "$p/notes.txt"
+  git -C "$p" add .gitattributes notes.txt; git -C "$p" commit -qm "secret inside an LFS object"
+  check "fixture: git stores only a pointer for the secret file" grep -q '^version https://git-lfs' <(git -C "$p" cat-file -p HEAD:notes.txt)
+  rejects "scans LFS payloads before upload and blocks a secret inside one" "LFS payload\\(s\\) contain secrets" env FORGE_BOOTSTRAP=1 git -C "$p" push origin main
+  check "the branch did not reach the remote" no_remote_ref "$p.remote.git" refs/heads/main
+  check "no LFS object was uploaded" test -z "$(find "$p.remote.git" -path '*lfs/objects*' -type f 2>/dev/null)"
+else
+  echo "  skip LFS payload secret (git-lfs not installed)"
+fi
 
 p="$tmp/push-msg"; new_project "$p"
 bootstrap_push "$p" main

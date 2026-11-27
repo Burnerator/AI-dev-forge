@@ -188,9 +188,16 @@ fi
 
 # core.hooksPath replaces the whole hooks directory: the forge chains only
 # pre-push, so warn about every other active hook it would switch off.
-if hooks_dir="$(git -C "$TARGET" rev-parse --git-common-dir 2>/dev/null)"; then
-  [[ "$hooks_dir" != /* ]] && hooks_dir="$TARGET/$hooks_dir"
-  hooks_dir="$hooks_dir/hooks"
+# The effective hooks directory: a custom core.hooksPath if one is set
+# (husky, lefthook...), otherwise $GIT_COMMON_DIR/hooks.
+if common_dir="$(git -C "$TARGET" rev-parse --git-common-dir 2>/dev/null)"; then
+  [[ "$common_dir" != /* ]] && common_dir="$TARGET/$common_dir"
+  hooks_dir="$(git -C "$TARGET" config --get core.hooksPath || true)"
+  if [[ -z "$hooks_dir" ]]; then
+    hooks_dir="$common_dir/hooks"
+  elif [[ "$hooks_dir" != /* ]]; then
+    hooks_dir="$TARGET/$hooks_dir"
+  fi
   others=()
   for h in "$hooks_dir"/*; do
     [[ -f "$h" && -x "$h" ]] || continue
@@ -204,6 +211,9 @@ if hooks_dir="$(git -C "$TARGET" rev-parse --git-common-dir 2>/dev/null)"; then
     echo "  ${hooks_dir#"$TARGET"/}: ${others[*]}"
     echo "  The forge's pre-push hook chains only pre-push. Copy (or symlink) the others"
     echo "  into .githooks/ before enabling it, or they will silently stop running."
+    if [[ -x "$hooks_dir/pre-push" && "$hooks_dir" != "$common_dir/hooks" ]]; then
+      echo "  Also record the existing pre-push: git config forge.previousHook ${hooks_dir#"$TARGET"/}/pre-push"
+    fi
   fi
 fi
 
